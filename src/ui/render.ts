@@ -2,6 +2,7 @@ import type { StagedChangesResult, StagedFileChange } from "../domain/staged-cha
 import type { DiffBudgetStats } from "../domain/diff-budget.js";
 import type { Suggestion } from "../domain/suggestion-schema.js";
 import { formatCommitMessage } from "../domain/suggestion-schema.js";
+import type { SanitizationReport } from "../security/types.js";
 
 /**
  * Escapes control characters and ANSI escape sequences in filenames
@@ -93,6 +94,46 @@ export function renderStagedSummary(result: StagedChangesResult): string {
 
 export function renderNoStagedChanges(): string {
   return "No staged changes detected. Use 'git add <files>' to stage changes before running vibecommit.\n";
+}
+
+export function renderPrivacySummary(report: SanitizationReport): string {
+  const hasRedactions = report.totalRedactions > 0;
+  const hasWithheld = report.filesWithheldByPolicyCount > 0;
+  const hasBinaryWithheld = report.binaryFilesWithheldCount > 0;
+  const hasSummarized = report.filesSummarizedByPolicyCount > 0;
+  const isTruncated = report.truncated;
+
+  if (!hasRedactions && !hasWithheld && !hasBinaryWithheld && !hasSummarized && !isTruncated) {
+    return "Privacy summary: content inspected, 0 secrets detected, 0 files withheld\n";
+  }
+
+  const lines: string[] = ["Privacy summary:"];
+
+  if (hasRedactions) {
+    const s = report.totalRedactions === 1 ? "" : "s";
+    lines.push(`- ${report.totalRedactions} sensitive-looking value${s} redacted`);
+  }
+
+  if (hasWithheld) {
+    const s = report.filesWithheldByPolicyCount === 1 ? "" : "s";
+    lines.push(`- ${report.filesWithheldByPolicyCount} file content${s} withheld by path policy`);
+  }
+
+  if (hasBinaryWithheld) {
+    const s = report.binaryFilesWithheldCount === 1 ? "" : "s";
+    lines.push(`- ${report.binaryFilesWithheldCount} binary file${s} represented as metadata only`);
+  }
+
+  if (hasSummarized) {
+    const s = report.filesSummarizedByPolicyCount === 1 ? "" : "s";
+    lines.push(`- ${report.filesSummarizedByPolicyCount} file${s} summarized by policy`);
+  }
+
+  if (isTruncated) {
+    lines.push("- Diff context truncated after sanitization");
+  }
+
+  return lines.join("\n") + "\n";
 }
 
 export function renderDiffBudgetStats(stats: DiffBudgetStats): string {

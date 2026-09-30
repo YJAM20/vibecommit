@@ -51,7 +51,7 @@ function toCQuoted(str: string): string {
   return hasQuoted ? out : "";
 }
 
-function splitDiffSections(diffText: string): string[] {
+export function splitDiffSections(diffText: string): string[] {
   const lines = diffText.split(/\r?\n/);
   const sections: string[] = [];
   let current: string[] = [];
@@ -72,7 +72,10 @@ function splitDiffSections(diffText: string): string[] {
   return sections;
 }
 
-function extractHeaderLines(section: string): { headerLines: string[]; bodyLines: string[] } {
+export function extractHeaderLines(section: string): {
+  headerLines: string[];
+  bodyLines: string[];
+} {
   const lines = section.split("\n");
   const headerLines: string[] = [];
   const bodyLines: string[] = [];
@@ -92,7 +95,7 @@ function extractHeaderLines(section: string): { headerLines: string[]; bodyLines
   return { headerLines, bodyLines };
 }
 
-function matchesHeader(headerLine: string, file: StagedFileChange): boolean {
+export function matchesHeader(headerLine: string, file: StagedFileChange): boolean {
   if (headerLine.includes(file.path)) {
     return true;
   }

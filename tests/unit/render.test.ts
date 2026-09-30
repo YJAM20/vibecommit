@@ -4,6 +4,7 @@ import {
   escapeControlCharacters,
   renderDiffBudgetStats,
   renderNoStagedChanges,
+  renderPrivacySummary,
   renderStagedSummary,
   renderSuggestions,
 } from "../../src/ui/render.js";
@@ -169,5 +170,57 @@ describe("renderSuggestions", () => {
     expect(output).toContain("\\x1b[31m");
     expect(output).not.toContain("\t");
     expect(output).toContain("\\t");
+  });
+});
+
+describe("renderPrivacySummary", () => {
+  test("renders clean status message when no secrets or files are withheld or summarized", () => {
+    const report = {
+      totalRedactions: 0,
+      redactionsByCategory: {},
+      filesWithheldByPolicyCount: 0,
+      filesSummarizedByPolicyCount: 0,
+      binaryFilesWithheldCount: 0,
+      truncated: false,
+    };
+
+    const output = renderPrivacySummary(report);
+    expect(output).toBe(
+      "Privacy summary: content inspected, 0 secrets detected, 0 files withheld\n",
+    );
+  });
+
+  test("renders formatted list with counts and truncation note when secrets and files are affected", () => {
+    const report = {
+      totalRedactions: 3,
+      redactionsByCategory: { openai_api_key: 2, bearer_token: 1 },
+      filesWithheldByPolicyCount: 2,
+      filesSummarizedByPolicyCount: 1,
+      binaryFilesWithheldCount: 1,
+      truncated: true,
+    };
+
+    const output = renderPrivacySummary(report);
+    expect(output).toContain("Privacy summary:");
+    expect(output).toContain("- 3 sensitive-looking values redacted");
+    expect(output).toContain("- 2 file contents withheld by path policy");
+    expect(output).toContain("- 1 binary file represented as metadata only");
+    expect(output).toContain("- 1 file summarized by policy");
+    expect(output).toContain("- Diff context truncated after sanitization");
+  });
+
+  test("handles singular count phrasing correctly", () => {
+    const report = {
+      totalRedactions: 1,
+      redactionsByCategory: { openai_api_key: 1 },
+      filesWithheldByPolicyCount: 1,
+      filesSummarizedByPolicyCount: 0,
+      binaryFilesWithheldCount: 0,
+      truncated: false,
+    };
+
+    const output = renderPrivacySummary(report);
+    expect(output).toContain("- 1 sensitive-looking value redacted");
+    expect(output).toContain("- 1 file content withheld by path policy");
   });
 });

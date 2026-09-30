@@ -1,13 +1,15 @@
 import { Command, CommanderError } from "commander";
-import { applyDiffBudget } from "./domain/diff-budget.js";
 import { generateHeuristicSuggestions } from "./domain/heuristics.js";
 import { formatCommitMessage } from "./domain/suggestion-schema.js";
 import { validateCommitMessage } from "./domain/validate-message.js";
 import type { GitClient } from "./git/git-client.js";
 import { DefaultGitClient } from "./git/git-client.js";
+import { buildSanitizedDiff } from "./security/sanitized-diff.js";
+import type { SanitizedDiff } from "./security/types.js";
 import {
   renderDiffBudgetStats,
   renderNoStagedChanges,
+  renderPrivacySummary,
   renderStagedSummary,
   renderSuggestions,
 } from "./ui/render.js";
@@ -114,8 +116,18 @@ async function runFlow(options: CliOptions, io: Io, gitClient: GitClient): Promi
 
   io.stdout(renderStagedSummary(stagedResult));
 
-  const budgetResult = applyDiffBudget(stagedResult.diffText, stagedResult.files);
-  io.stdout(renderDiffBudgetStats(budgetResult.stats));
+  let sanitizedDiff: SanitizedDiff;
+  try {
+    sanitizedDiff = buildSanitizedDiff(stagedResult.files, stagedResult.diffText);
+  } catch (error: unknown) {
+    throw new VibeCommitError("Failed to sanitize staged diff", {
+      hint: "Inspect staged changes or retry with smaller files.",
+      cause: error,
+    });
+  }
+
+  io.stdout(renderPrivacySummary(sanitizedDiff.report));
+  io.stdout(renderDiffBudgetStats(sanitizedDiff.budgetStats));
 
   if (options.dryRun) {
     io.stdout("Dry-run mode is active.\n");
