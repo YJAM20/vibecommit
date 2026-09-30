@@ -1,14 +1,40 @@
 import { describe, expect, test } from "vitest";
 import { main } from "../../src/app.js";
 import type { Io } from "../../src/app.js";
+import type { GitClient } from "../../src/git/git-client.js";
 
-function createTestIo(): {
+function createTestContext(): {
   io: Io;
+  gitClient: GitClient;
   getStdout: () => string;
   getStderr: () => string;
 } {
   const stdoutChunks: string[] = [];
   const stderrChunks: string[] = [];
+
+  const mockGitClient: GitClient = {
+    checkGitInstalled: () => Promise.resolve(),
+    getRepoRoot: () => Promise.resolve("/mock/repo"),
+    getStagedDiff: () => Promise.resolve(""),
+    getStagedChanges: () =>
+      Promise.resolve({
+        repoRoot: "/mock/repo",
+        files: [],
+        summary: {
+          totalFiles: 0,
+          additions: 0,
+          deletions: 0,
+          statusCounts: {
+            added: 0,
+            modified: 0,
+            deleted: 0,
+            renamed: 0,
+            copied: 0,
+          },
+        },
+        diffText: "",
+      }),
+  };
 
   return {
     io: {
@@ -19,6 +45,7 @@ function createTestIo(): {
         stderrChunks.push(chunk);
       },
     },
+    gitClient: mockGitClient,
     getStdout: () => stdoutChunks.join(""),
     getStderr: () => stderrChunks.join(""),
   };
@@ -26,8 +53,8 @@ function createTestIo(): {
 
 describe("CLI argument handling and output", () => {
   test("no flags: returns 0, stdout contains banner with version and not implemented yet, stderr empty", async () => {
-    const { io, getStdout, getStderr } = createTestIo();
-    const exitCode = await main(["node", "vibecommit"], io);
+    const { io, gitClient, getStdout, getStderr } = createTestContext();
+    const exitCode = await main(["node", "vibecommit"], { io, gitClient });
 
     expect(exitCode).toBe(0);
     const stdout = getStdout();
@@ -39,8 +66,8 @@ describe("CLI argument handling and output", () => {
   });
 
   test("--dry-run: returns 0, stdout includes dry-run line only", async () => {
-    const { io, getStdout, getStderr } = createTestIo();
-    const exitCode = await main(["node", "vibecommit", "--dry-run"], io);
+    const { io, gitClient, getStdout, getStderr } = createTestContext();
+    const exitCode = await main(["node", "vibecommit", "--dry-run"], { io, gitClient });
 
     expect(exitCode).toBe(0);
     const stdout = getStdout();
@@ -52,8 +79,8 @@ describe("CLI argument handling and output", () => {
   });
 
   test("--no-ai: returns 0, stdout includes AI-disabled line only", async () => {
-    const { io, getStdout, getStderr } = createTestIo();
-    const exitCode = await main(["node", "vibecommit", "--no-ai"], io);
+    const { io, gitClient, getStdout, getStderr } = createTestContext();
+    const exitCode = await main(["node", "vibecommit", "--no-ai"], { io, gitClient });
 
     expect(exitCode).toBe(0);
     const stdout = getStdout();
@@ -65,8 +92,8 @@ describe("CLI argument handling and output", () => {
   });
 
   test("both flags together: returns 0, both lines present", async () => {
-    const { io, getStdout, getStderr } = createTestIo();
-    const exitCode = await main(["node", "vibecommit", "--dry-run", "--no-ai"], io);
+    const { io, gitClient, getStdout, getStderr } = createTestContext();
+    const exitCode = await main(["node", "vibecommit", "--dry-run", "--no-ai"], { io, gitClient });
 
     expect(exitCode).toBe(0);
     const stdout = getStdout();
@@ -78,8 +105,8 @@ describe("CLI argument handling and output", () => {
   });
 
   test("--help: returns 0, stdout mentions both flags and program name", async () => {
-    const { io, getStdout, getStderr } = createTestIo();
-    const exitCode = await main(["node", "vibecommit", "--help"], io);
+    const { io, gitClient, getStdout, getStderr } = createTestContext();
+    const exitCode = await main(["node", "vibecommit", "--help"], { io, gitClient });
 
     expect(exitCode).toBe(0);
     const stdout = getStdout();
@@ -90,20 +117,23 @@ describe("CLI argument handling and output", () => {
   });
 
   test("--version and -V: returns 0, stdout contains version read from real package.json", async () => {
-    const { io: io1, getStdout: getStdout1 } = createTestIo();
-    const code1 = await main(["node", "vibecommit", "--version"], io1);
+    const { io: io1, gitClient: client1, getStdout: getStdout1 } = createTestContext();
+    const code1 = await main(["node", "vibecommit", "--version"], {
+      io: io1,
+      gitClient: client1,
+    });
     expect(code1).toBe(0);
     expect(getStdout1().trim()).toBe("0.1.0");
 
-    const { io: io2, getStdout: getStdout2 } = createTestIo();
-    const code2 = await main(["node", "vibecommit", "-V"], io2);
+    const { io: io2, gitClient: client2, getStdout: getStdout2 } = createTestContext();
+    const code2 = await main(["node", "vibecommit", "-V"], { io: io2, gitClient: client2 });
     expect(code2).toBe(0);
     expect(getStdout2().trim()).toBe("0.1.0");
   });
 
   test("unknown option: returns 2, stderr contains unknown-option message once and help hint, stdout empty, no stack trace", async () => {
-    const { io, getStdout, getStderr } = createTestIo();
-    const exitCode = await main(["node", "vibecommit", "--bogus"], io);
+    const { io, gitClient, getStdout, getStderr } = createTestContext();
+    const exitCode = await main(["node", "vibecommit", "--bogus"], { io, gitClient });
 
     expect(exitCode).toBe(2);
     expect(getStdout()).toBe("");
@@ -118,8 +148,11 @@ describe("CLI argument handling and output", () => {
   });
 
   test("unexpected positional argument: returns 2 with a usage error", async () => {
-    const { io, getStdout, getStderr } = createTestIo();
-    const exitCode = await main(["node", "vibecommit", "extra-positional-argument"], io);
+    const { io, gitClient, getStdout, getStderr } = createTestContext();
+    const exitCode = await main(["node", "vibecommit", "extra-positional-argument"], {
+      io,
+      gitClient,
+    });
 
     expect(exitCode).toBe(2);
     expect(getStdout()).toBe("");

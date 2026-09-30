@@ -1,4 +1,7 @@
 import { Command, CommanderError } from "commander";
+import type { GitClient } from "./git/git-client.js";
+import { DefaultGitClient } from "./git/git-client.js";
+import { renderNoStagedChanges, renderStagedSummary } from "./ui/render.js";
 import { ExitCode, reportError } from "./utils/errors.js";
 import { getVersion } from "./utils/version.js";
 
@@ -10,6 +13,11 @@ export interface Io {
 export interface CliOptions {
   dryRun: boolean;
   noAi: boolean;
+}
+
+export interface AppDependencies {
+  readonly io?: Io;
+  readonly gitClient?: GitClient;
 }
 
 interface RawOptions {
@@ -50,21 +58,61 @@ export function createProgram(io: Io): Command {
   return program;
 }
 
-function run(options: CliOptions, io: Io): void {
+function isIo(value: Io | AppDependencies): value is Io {
+  return "stdout" in value && typeof value.stdout === "function";
+}
+
+function resolveDependencies(ioOrDeps: Io | AppDependencies): {
+  io: Io;
+  gitClient: GitClient;
+} {
+  if (isIo(ioOrDeps)) {
+    return {
+      io: ioOrDeps,
+      gitClient: new DefaultGitClient(),
+    };
+  }
+
+  const appIo = ioOrDeps.io ?? defaultIo;
+  const appGitClient = ioOrDeps.gitClient ?? new DefaultGitClient();
+
+  return {
+    io: appIo,
+    gitClient: appGitClient,
+  };
+}
+
+async function runFlow(options: CliOptions, io: Io, gitClient: GitClient): Promise<void> {
   const version = getVersion();
   io.stdout(`vibecommit v${version}\n`);
-  io.stdout(
-    "Phase 1 skeleton: Git analysis, redaction, and AI suggestions are not implemented yet.\n",
-  );
+
+  await gitClient.checkGitInstalled();
+  await gitClient.getRepoRoot();
+
+  const stagedResult = await gitClient.getStagedChanges();
+
+  if (stagedResult.files.length === 0) {
+    io.stdout(renderNoStagedChanges());
+  } else {
+    io.stdout(renderStagedSummary(stagedResult));
+  }
+
   if (options.dryRun) {
     io.stdout("Dry-run mode is active.\n");
   }
   if (options.noAi) {
     io.stdout("AI is disabled.\n");
   }
+
+  io.stdout("Redaction, AI suggestions, and commit creation are not implemented yet.\n");
 }
 
-export function main(argv: string[], io: Io = defaultIo): Promise<number> {
+export async function main(
+  argv: string[],
+  ioOrDeps: Io | AppDependencies = defaultIo,
+): Promise<number> {
+  const { io, gitClient } = resolveDependencies(ioOrDeps);
+
   try {
     const program = createProgram(io);
     program.parse(argv);
@@ -75,16 +123,16 @@ export function main(argv: string[], io: Io = defaultIo): Promise<number> {
       noAi: rawOptions.ai === false,
     };
 
-    run(options, io);
-    return Promise.resolve(ExitCode.Success);
+    await runFlow(options, io, gitClient);
+    return ExitCode.Success;
   } catch (error: unknown) {
     if (error instanceof CommanderError) {
       if (error.code === "commander.helpDisplayed" || error.code === "commander.version") {
-        return Promise.resolve(ExitCode.Success);
+        return ExitCode.Success;
       }
       io.stderr("Run 'vibecommit --help' for usage details.\n");
-      return Promise.resolve(ExitCode.UsageError);
+      return ExitCode.UsageError;
     }
-    return Promise.resolve(reportError(error, io.stderr));
+    return reportError(error, io.stderr);
   }
 }

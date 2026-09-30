@@ -4,7 +4,11 @@ Privacy-aware AI-powered Git CLI for Conventional Commit suggestions.
 
 ## Status
 
-Status: under active development (Phase 1: project foundation)
+Status: under active development (Phase 2: Git read layer)
+
+## Current behavior
+
+Inspects and summarizes staged Git changes safely in the terminal without creating commits or making AI calls.
 
 ## Development
 
