@@ -4,11 +4,11 @@ Privacy-aware AI-powered Git CLI for Conventional Commit suggestions.
 
 ## Status
 
-Status: under active development (Phase 2: Git read layer)
+Status: under active development (Phase 3: Domain model, validation, heuristic generator, diff budgeting)
 
 ## Current behavior
 
-Inspects and summarizes staged Git changes safely in the terminal without creating commits or making AI calls.
+`--no-ai` generates three local Conventional Commit suggestions from staged Git changes using deterministic heuristics. Default mode summarizes staged changes and diff budget limits without AI suggestions (AI generation is not implemented yet). Nothing is committed.
 
 ## Development
 

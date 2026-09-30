@@ -1,8 +1,17 @@
 import { Command, CommanderError } from "commander";
+import { applyDiffBudget } from "./domain/diff-budget.js";
+import { generateHeuristicSuggestions } from "./domain/heuristics.js";
+import { formatCommitMessage } from "./domain/suggestion-schema.js";
+import { validateCommitMessage } from "./domain/validate-message.js";
 import type { GitClient } from "./git/git-client.js";
 import { DefaultGitClient } from "./git/git-client.js";
-import { renderNoStagedChanges, renderStagedSummary } from "./ui/render.js";
-import { ExitCode, reportError } from "./utils/errors.js";
+import {
+  renderDiffBudgetStats,
+  renderNoStagedChanges,
+  renderStagedSummary,
+  renderSuggestions,
+} from "./ui/render.js";
+import { ExitCode, reportError, VibeCommitError } from "./utils/errors.js";
 import { getVersion } from "./utils/version.js";
 
 export interface Io {
@@ -93,18 +102,49 @@ async function runFlow(options: CliOptions, io: Io, gitClient: GitClient): Promi
 
   if (stagedResult.files.length === 0) {
     io.stdout(renderNoStagedChanges());
-  } else {
-    io.stdout(renderStagedSummary(stagedResult));
+    if (options.dryRun) {
+      io.stdout("Dry-run mode is active.\n");
+    }
+    if (options.noAi) {
+      io.stdout("AI is disabled.\n");
+    }
+    io.stdout("Redaction, AI suggestions, and commit creation are not implemented yet.\n");
+    return;
   }
+
+  io.stdout(renderStagedSummary(stagedResult));
+
+  const budgetResult = applyDiffBudget(stagedResult.diffText, stagedResult.files);
+  io.stdout(renderDiffBudgetStats(budgetResult.stats));
 
   if (options.dryRun) {
     io.stdout("Dry-run mode is active.\n");
   }
+
   if (options.noAi) {
     io.stdout("AI is disabled.\n");
-  }
 
-  io.stdout("Redaction, AI suggestions, and commit creation are not implemented yet.\n");
+    const suggestions = generateHeuristicSuggestions(stagedResult.files);
+
+    for (const s of suggestions) {
+      const formatted = formatCommitMessage(s);
+      const validation = validateCommitMessage(formatted);
+      if (!validation.ok) {
+        throw new VibeCommitError(
+          `Generated suggestion '${formatted}' failed validation: ${validation.errors.join(", ")}`,
+        );
+      }
+    }
+
+    io.stdout(renderSuggestions(suggestions));
+    io.stdout("Suggestions generated using local heuristics (no AI model called).\n");
+    io.stdout("Interactive selection and commit creation are not implemented yet.\n");
+  } else {
+    io.stdout(
+      "AI commit suggestions are not implemented yet. Use '--no-ai' to view local heuristic suggestions.\n",
+    );
+    io.stdout("Redaction, AI suggestions, and commit creation are not implemented yet.\n");
+  }
 }
 
 export async function main(

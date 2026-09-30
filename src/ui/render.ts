@@ -1,4 +1,7 @@
 import type { StagedChangesResult, StagedFileChange } from "../domain/staged-change.js";
+import type { DiffBudgetStats } from "../domain/diff-budget.js";
+import type { Suggestion } from "../domain/suggestion-schema.js";
+import { formatCommitMessage } from "../domain/suggestion-schema.js";
 
 /**
  * Escapes control characters and ANSI escape sequences in filenames
@@ -90,4 +93,33 @@ export function renderStagedSummary(result: StagedChangesResult): string {
 
 export function renderNoStagedChanges(): string {
   return "No staged changes detected. Use 'git add <files>' to stage changes before running vibecommit.\n";
+}
+
+export function renderDiffBudgetStats(stats: DiffBudgetStats): string {
+  const budgeted = stats.budgetedChars;
+  const original = stats.originalChars;
+
+  if (stats.wasReduced) {
+    const details: string[] = [];
+    if (stats.filesCollapsed > 0) details.push(`${stats.filesCollapsed} collapsed`);
+    if (stats.filesTruncated > 0) details.push(`${stats.filesTruncated} truncated`);
+    if (stats.filesOmitted > 0) details.push(`${stats.filesOmitted} omitted`);
+    const detailsStr = details.length > 0 ? ` (${details.join(", ")})` : "";
+    return `Diff budget: ${budgeted.toLocaleString()} chars (original ${original.toLocaleString()} chars, reduced by limits)${detailsStr}\n`;
+  }
+  return `Diff budget: ${budgeted.toLocaleString()} chars (within limits)\n`;
+}
+
+export function renderSuggestions(suggestions: readonly Suggestion[]): string {
+  const lines: string[] = [];
+  lines.push("Suggested commit messages (local heuristics):");
+
+  for (let i = 0; i < suggestions.length; i++) {
+    const s = suggestions[i]!;
+    const formatted = formatCommitMessage(s);
+    lines.push(`  ${i + 1}. ${escapeControlCharacters(formatted)}`);
+    lines.push(`     Reason: ${escapeControlCharacters(s.reason)}`);
+  }
+
+  return lines.join("\n") + "\n";
 }

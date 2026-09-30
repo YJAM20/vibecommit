@@ -2,8 +2,10 @@ import { describe, expect, test } from "vitest";
 import type { StagedChangesResult } from "../../src/domain/staged-change.js";
 import {
   escapeControlCharacters,
+  renderDiffBudgetStats,
   renderNoStagedChanges,
   renderStagedSummary,
+  renderSuggestions,
 } from "../../src/ui/render.js";
 
 describe("escapeControlCharacters", () => {
@@ -83,5 +85,89 @@ describe("renderStagedSummary", () => {
     const output = renderNoStagedChanges();
     expect(output).toContain("No staged changes detected");
     expect(output).toContain("git add <files>");
+  });
+});
+
+describe("renderDiffBudgetStats", () => {
+  test("renders budget note without reduction", () => {
+    const stats = {
+      originalChars: 1500,
+      budgetedChars: 1500,
+      filesTruncated: 0,
+      filesCollapsed: 0,
+      filesOmitted: 0,
+      unmatchedSections: 0,
+      wasReduced: false,
+    };
+    const output = renderDiffBudgetStats(stats);
+    expect(output).toContain("Diff budget: 1,500 chars (within limits)");
+    expect(output).not.toContain("reduced by limits");
+  });
+
+  test("renders budget note with reduction and details", () => {
+    const stats = {
+      originalChars: 35000,
+      budgetedChars: 22000,
+      filesTruncated: 2,
+      filesCollapsed: 1,
+      filesOmitted: 1,
+      unmatchedSections: 0,
+      wasReduced: true,
+    };
+    const output = renderDiffBudgetStats(stats);
+    expect(output).toContain(
+      "Diff budget: 22,000 chars (original 35,000 chars, reduced by limits)",
+    );
+    expect(output).toContain("1 collapsed, 2 truncated, 1 omitted");
+  });
+});
+
+describe("renderSuggestions", () => {
+  test("renders numbered suggestions list with formatted message and reason", () => {
+    const suggestions = [
+      {
+        type: "feat" as const,
+        scope: "cli",
+        subject: "add suggestion output",
+        reason: "new cli functionality",
+      },
+      {
+        type: "refactor" as const,
+        scope: null,
+        subject: "restructure output format",
+        reason: "cleaner presentation",
+      },
+      {
+        type: "chore" as const,
+        scope: null,
+        subject: "update project files",
+        reason: "general maintenance",
+      },
+    ];
+
+    const output = renderSuggestions(suggestions);
+    expect(output).toContain("1. feat(cli): add suggestion output");
+    expect(output).toContain("   Reason: new cli functionality");
+    expect(output).toContain("2. refactor: restructure output format");
+    expect(output).toContain("   Reason: cleaner presentation");
+    expect(output).toContain("3. chore: update project files");
+    expect(output).toContain("   Reason: general maintenance");
+  });
+
+  test("safely escapes ANSI and control characters in suggestions", () => {
+    const suggestions = [
+      {
+        type: "feat" as const,
+        scope: null,
+        subject: "add feature\x1b[31mwith colors",
+        reason: "line with\ttab and\nnewline",
+      },
+    ];
+
+    const output = renderSuggestions(suggestions);
+    expect(output).not.toContain("\x1b[31m");
+    expect(output).toContain("\\x1b[31m");
+    expect(output).not.toContain("\t");
+    expect(output).toContain("\\t");
   });
 });

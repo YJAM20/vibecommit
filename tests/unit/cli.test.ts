@@ -161,3 +161,149 @@ describe("CLI argument handling and output", () => {
     expect(stderr).toContain("vibecommit --help");
   });
 });
+
+describe("staged changes CLI flow in Phase 3", () => {
+  function createStagedTestContext() {
+    const stdoutChunks: string[] = [];
+    const stderrChunks: string[] = [];
+
+    const mockGitClient: GitClient = {
+      checkGitInstalled: () => Promise.resolve(),
+      getRepoRoot: () => Promise.resolve("/mock/repo"),
+      getStagedDiff: () => Promise.resolve("diff --git a/src/app.ts b/src/app.ts\n+line"),
+      getStagedChanges: () =>
+        Promise.resolve({
+          repoRoot: "/mock/repo",
+          files: [
+            {
+              status: "modified",
+              path: "src/domain/app.ts",
+              isBinary: false,
+              additions: 1,
+              deletions: 0,
+              hasTextDiff: true,
+            },
+          ],
+          summary: {
+            totalFiles: 1,
+            additions: 1,
+            deletions: 0,
+            statusCounts: {
+              added: 0,
+              modified: 1,
+              deleted: 0,
+              renamed: 0,
+              copied: 0,
+            },
+          },
+          diffText: "diff --git a/src/domain/app.ts b/src/domain/app.ts\n+line",
+        }),
+    };
+
+    return {
+      io: {
+        stdout: (chunk: string) => {
+          stdoutChunks.push(chunk);
+        },
+        stderr: (chunk: string) => {
+          stderrChunks.push(chunk);
+        },
+      },
+      gitClient: mockGitClient,
+      getStdout: () => stdoutChunks.join(""),
+      getStderr: () => stderrChunks.join(""),
+    };
+  }
+
+  test("with staged changes and --no-ai: outputs summary, diff budget line, and 3 valid suggestions", async () => {
+    const { io, gitClient, getStdout, getStderr } = createStagedTestContext();
+    const exitCode = await main(["node", "vibecommit", "--no-ai"], { io, gitClient });
+
+    expect(exitCode).toBe(0);
+    const stdout = getStdout();
+    expect(stdout).toContain("Staged files: 1");
+    expect(stdout).toContain("Diff budget:");
+    expect(stdout).toContain("1. refactor(domain):");
+    expect(stdout).toContain("2. fix(domain):");
+    expect(stdout).toContain("3. ");
+    expect(stdout).toContain("Suggestions generated using local heuristics");
+    expect(stdout).toContain("Interactive selection and commit creation are not implemented yet");
+    expect(getStderr()).toBe("");
+  });
+
+  test("with staged changes and no flags: outputs summary and diff budget, notes AI not implemented yet, no suggestions", async () => {
+    const { io, gitClient, getStdout, getStderr } = createStagedTestContext();
+    const exitCode = await main(["node", "vibecommit"], { io, gitClient });
+
+    expect(exitCode).toBe(0);
+    const stdout = getStdout();
+    expect(stdout).toContain("Staged files: 1");
+    expect(stdout).toContain("Diff budget:");
+    expect(stdout).toContain("AI commit suggestions are not implemented yet");
+    expect(stdout).not.toContain("1. ");
+    expect(stdout).not.toContain("Suggestions generated using local heuristics");
+    expect(getStderr()).toBe("");
+  });
+
+  test("proves only read-only Git subcommands are executed and never write commands", async () => {
+    const executedCommands: string[][] = [];
+    const recordingRunner = (args: readonly string[]) => {
+      executedCommands.push([...args]);
+      if (args[0] === "--version") {
+        return Promise.resolve({ stdout: "git version 2.45.0\n", stderr: "", exitCode: 0 });
+      }
+      if (args[0] === "rev-parse") {
+        return Promise.resolve({ stdout: "/mock/repo\n", stderr: "", exitCode: 0 });
+      }
+      if (args[0] === "diff" && args.includes("--name-status")) {
+        return Promise.resolve({ stdout: "M\0src/app.ts\0", stderr: "", exitCode: 0 });
+      }
+      if (args[0] === "diff" && args.includes("--numstat")) {
+        return Promise.resolve({ stdout: "1\t0\tsrc/app.ts\0", stderr: "", exitCode: 0 });
+      }
+      if (args[0] === "diff") {
+        return Promise.resolve({
+          stdout: "diff --git a/src/app.ts b/src/app.ts\n+line",
+          stderr: "",
+          exitCode: 0,
+        });
+      }
+      return Promise.resolve({ stdout: "", stderr: "", exitCode: 0 });
+    };
+
+    const { DefaultGitClient } = await import("../../src/git/git-client.js");
+    const recordingClient = new DefaultGitClient("/mock/repo", recordingRunner);
+
+    const stdoutChunks: string[] = [];
+    const io: Io = {
+      stdout: (chunk: string) => stdoutChunks.push(chunk),
+      stderr: () => {},
+    };
+
+    const exitCode = await main(["node", "vibecommit", "--no-ai", "--dry-run"], {
+      io,
+      gitClient: recordingClient,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(executedCommands.length).toBeGreaterThan(0);
+
+    const forbiddenSubcommands = [
+      "commit",
+      "add",
+      "reset",
+      "push",
+      "checkout",
+      "rm",
+      "branch",
+      "clean",
+      "merge",
+      "rebase",
+    ];
+    for (const cmd of executedCommands) {
+      for (const forbidden of forbiddenSubcommands) {
+        expect(cmd).not.toContain(forbidden);
+      }
+    }
+  });
+});

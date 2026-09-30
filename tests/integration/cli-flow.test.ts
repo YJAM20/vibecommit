@@ -119,6 +119,158 @@ describe("CLI flow integration with real and simulated repositories", () => {
     }
   });
 
+  test("--no-ai with staged docs-only changes prints three suggestions with first typed docs", async () => {
+    const repo = await createTempRepo();
+    const { io, getStdout, getStderr } = createTestIo();
+
+    try {
+      const secretMarker = "DISTINCT_SECRET_DOCS_MARKER_9999";
+      await writeFile(join(repo.path, "README.md"), `# Title\n${secretMarker}\n`);
+      await repo.runGit(["add", "README.md"]);
+
+      const diffBefore = await repo.runGit(["diff", "--staged"]);
+      expect(diffBefore.stdout).toContain(secretMarker);
+
+      const exitCode = await main(["node", "vibecommit", "--no-ai"], {
+        io,
+        gitClient: new DefaultGitClient(repo.path),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(getStderr()).toBe("");
+
+      const stdout = getStdout();
+      expect(stdout).toContain("Staged files: 1 (1 added)");
+      expect(stdout).toContain("Diff budget:");
+      expect(stdout).toContain("1. docs");
+      expect(stdout).toContain("2. ");
+      expect(stdout).toContain("3. ");
+      expect(stdout).toContain("Suggestions generated using local heuristics");
+
+      // Verify raw diff content is never printed
+      expect(stdout).not.toContain(secretMarker);
+
+      // Verify repository state is completely untouched
+      const diffAfter = await repo.runGit(["diff", "--staged"]);
+      expect(diffAfter.stdout).toBe(diffBefore.stdout);
+      const commitCheck = await repo.runGit(["rev-parse", "HEAD"]);
+      expect(commitCheck.exitCode).not.toBe(0);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  test("--no-ai --dry-run on a mixed staged set prints three valid suggestions and budget line", async () => {
+    const repo = await createTempRepo();
+    const { io, getStdout, getStderr } = createTestIo();
+
+    try {
+      const secretMarker = "DISTINCT_SECRET_MIXED_MARKER_8888";
+      await repo.runGit(["mkdir", "-p", "src"]); // wait, mkdir on Windows may be tricky, use Node mkdir or direct write
+      const { mkdir } = await import("node:fs/promises");
+      await mkdir(join(repo.path, "src"), { recursive: true });
+      await writeFile(join(repo.path, "src", "index.ts"), `export const a = 1;\n${secretMarker}\n`);
+      await writeFile(join(repo.path, "README.md"), `# Readme\n`);
+      await repo.runGit(["add", "."]);
+
+      const diffBefore = await repo.runGit(["diff", "--staged"]);
+
+      const exitCode = await main(["node", "vibecommit", "--no-ai", "--dry-run"], {
+        io,
+        gitClient: new DefaultGitClient(repo.path),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(getStderr()).toBe("");
+
+      const stdout = getStdout();
+      expect(stdout).toContain("Dry-run mode is active.");
+      expect(stdout).toContain("Diff budget:");
+      expect(stdout).toContain("1. ");
+      expect(stdout).toContain("2. ");
+      expect(stdout).toContain("3. ");
+      expect(stdout).toContain("Suggestions generated using local heuristics");
+      expect(stdout).not.toContain(secretMarker);
+
+      const diffAfter = await repo.runGit(["diff", "--staged"]);
+      expect(diffAfter.stdout).toBe(diffBefore.stdout);
+      const commitCheck = await repo.runGit(["rev-parse", "HEAD"]);
+      expect(commitCheck.exitCode).not.toBe(0);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  test("large staged text file produces size-reduction note and never leaks marker content", async () => {
+    const repo = await createTempRepo();
+    const { io, getStdout, getStderr } = createTestIo();
+
+    try {
+      const deepMarker = "DISTINCTIVE_DEEP_MARKER_CONTENT_7777";
+      // Generate > 30000 characters of text to exceed 24000 total budget
+      const largeContent = `Line 0\n${"// repetitive filler content line\n".repeat(1200)}\n${deepMarker}\n`;
+      await writeFile(join(repo.path, "large.txt"), largeContent);
+      await repo.runGit(["add", "large.txt"]);
+
+      const diffBefore = await repo.runGit(["diff", "--staged"]);
+      expect(diffBefore.stdout).toContain(deepMarker);
+
+      const exitCode = await main(["node", "vibecommit", "--no-ai"], {
+        io,
+        gitClient: new DefaultGitClient(repo.path),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(getStderr()).toBe("");
+
+      const stdout = getStdout();
+      expect(stdout).toContain("Diff budget:");
+      expect(stdout).toContain("reduced by limits");
+      expect(stdout).not.toContain(deepMarker);
+
+      const diffAfter = await repo.runGit(["diff", "--staged"]);
+      expect(diffAfter.stdout).toBe(diffBefore.stdout);
+      const commitCheck = await repo.runGit(["rev-parse", "HEAD"]);
+      expect(commitCheck.exitCode).not.toBe(0);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  test("staged changes without --no-ai prints AI not implemented yet and no suggestions", async () => {
+    const repo = await createTempRepo();
+    const { io, getStdout, getStderr } = createTestIo();
+
+    try {
+      const secretMarker = "DISTINCT_MARKER_NO_AI_FLAG_6666";
+      await writeFile(join(repo.path, "file.txt"), `content\n${secretMarker}\n`);
+      await repo.runGit(["add", "file.txt"]);
+
+      const diffBefore = await repo.runGit(["diff", "--staged"]);
+
+      const exitCode = await main(["node", "vibecommit"], {
+        io,
+        gitClient: new DefaultGitClient(repo.path),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(getStderr()).toBe("");
+
+      const stdout = getStdout();
+      expect(stdout).toContain("AI commit suggestions are not implemented yet. Use '--no-ai'");
+      expect(stdout).not.toContain("1. ");
+      expect(stdout).not.toContain("Suggestions generated using local heuristics");
+      expect(stdout).not.toContain(secretMarker);
+
+      const diffAfter = await repo.runGit(["diff", "--staged"]);
+      expect(diffAfter.stdout).toBe(diffBefore.stdout);
+      const commitCheck = await repo.runGit(["rev-parse", "HEAD"]);
+      expect(commitCheck.exitCode).not.toBe(0);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
   test("Git missing simulated via mock GitClient throws friendly error without crashing", async () => {
     const { io, getStdout, getStderr } = createTestIo();
 
