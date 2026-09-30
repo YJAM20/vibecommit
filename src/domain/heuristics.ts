@@ -4,27 +4,49 @@ import type { Suggestion } from "./suggestion-schema.js";
 import { formatCommitMessage, SuggestionSchema } from "./suggestion-schema.js";
 import { validateCommitMessage } from "./validate-message.js";
 import { classifyPath } from "./classify-paths.js";
-import type { PathCategory } from "./classify-paths.js";
 import { VibeCommitError } from "../utils/errors.js";
 
 /**
- * Heuristic Type Selection Rules Table:
- * -------------------------------------------------------------------------
- * Condition                                | Primary | Alt 1     | Alt 2
- * -----------------------------------------|---------|-----------|--------
- * All files are docs                       | docs    | chore     | refactor
- * All files are test                       | test    | refactor  | chore
- * All files are config / lockfile          | chore   | refactor  | fix
- * Source files present, any added          | feat    | refactor  | fix
- * Source files present, only deleted/rename| refactor| chore     | feat
- * Source files present, only modified      | refactor| fix       | feat
- * Mixed without source (tests present)     | test    | chore     | refactor
- * Mixed without source (docs present)      | docs    | chore     | refactor
- * Mixed without source (only other/config) | chore   | refactor  | fix
+ * Heuristic Bucket Selection Table (first match wins):
+ * -------------------------------------------------------------------------------------
+ * Bucket                      | Primary Type | Condition
+ * ----------------------------|--------------|-----------------------------------------
+ * 1.  binary-only             | chore        | Every staged file is binary
+ * 2.  rename-only-pure        | refactor     | Every file renamed, 0 additions/deletions
+ * 3.  delete-only             | chore        | Every file deleted
+ * 4.  docs-only               | docs         | Every file is in docs category
+ * 5.  test-only               | test         | Every file is in test category
+ * 6.  lockfile-only           | chore        | Every file is in lockfile category
+ * 7.  config-only             | chore        | Only config/lockfiles (at least 1 config)
+ * 8.  generated-only          | chore        | Every file is in generated category
+ * 9.  source-with-added       | feat         | Added source file with additions > 0
+ * 10. source-modified-or-other| chore        | Source files present without added source
+ * 11. mixed                   | chore        | Everything else
+ *
+ * Core Principles:
+ * - All three suggestions share the SAME commit type per bucket.
+ * - 'fix' is never produced by the heuristic engine.
+ * - 'feat' is produced only when at least one added source file with additions > 0 exists.
+ * - 'refactor' is produced only for pure renames (zero additions, zero deletions).
+ * - Modified-only source changes use 'chore' with neutral wording.
+ * - Wording is truthful and neutral, describing known metadata without purpose claims.
  */
 
+export type BucketId =
+  | "binary-only"
+  | "rename-only-pure"
+  | "delete-only"
+  | "docs-only"
+  | "test-only"
+  | "lockfile-only"
+  | "config-only"
+  | "generated-only"
+  | "source-with-added"
+  | "source-modified-or-other"
+  | "mixed";
+
 function sanitizeSubject(raw: string): string {
-  // Strip control characters
+  // Strip control characters via character code boundary checks
   let cleaned = "";
   for (let i = 0; i < raw.length; i++) {
     const code = raw.charCodeAt(i);
@@ -68,20 +90,18 @@ function extractBasename(filePath: string): string {
 }
 
 function deriveScope(changes: readonly StagedFileChange[]): string | null {
-  // Use source files if present; otherwise use all files
   const sourceChanges = changes.filter((c) => classifyPath(c.path) === "source");
-  const targetChanges = sourceChanges.length > 0 ? sourceChanges : changes;
+  if (sourceChanges.length === 0) {
+    return null;
+  }
 
-  // Split paths into directory segments
   const splitDirs: string[][] = [];
-  for (const c of targetChanges) {
+  for (const c of sourceChanges) {
     const normalized = c.path.replace(/\\/g, "/");
     const segments = normalized.split("/");
-    // If file is at the root level, scope cannot be derived
     if (segments.length <= 1) {
       return null;
     }
-    // Remove filename, keep directories
     splitDirs.push(segments.slice(0, -1));
   }
 
@@ -89,7 +109,6 @@ function deriveScope(changes: readonly StagedFileChange[]): string | null {
     return null;
   }
 
-  // Find longest common directory prefix
   const first = splitDirs[0]!;
   let commonLength = 0;
   for (let i = 0; i < first.length; i++) {
@@ -106,13 +125,10 @@ function deriveScope(changes: readonly StagedFileChange[]): string | null {
   }
 
   const commonSegments = first.slice(0, commonLength);
-
-  // A common prefix of just "src" gives null
   if (commonSegments.length === 1 && commonSegments[0]?.toLowerCase() === "src") {
     return null;
   }
 
-  // Take the deepest common directory name
   const deepest = commonSegments[commonSegments.length - 1]!;
   const sanitized = deepest
     .toLowerCase()
@@ -123,119 +139,75 @@ function deriveScope(changes: readonly StagedFileChange[]): string | null {
   return sanitized.length > 0 ? sanitized : null;
 }
 
-interface TypeSelection {
-  primary: CommitType;
-  alt1: CommitType;
-  alt2: CommitType;
-  categoryReason: string;
-}
-
-function selectCommitTypes(changes: readonly StagedFileChange[]): TypeSelection {
+export function classifyBucket(changes: readonly StagedFileChange[]): BucketId {
   const categories = changes.map((c) => classifyPath(c.path));
-  const categorySet = new Set<PathCategory>(categories);
 
-  const sourceFiles = changes.filter((_, i) => categories[i] === "source");
-  const testFiles = changes.filter((_, i) => categories[i] === "test");
-  const docsFiles = changes.filter((_, i) => categories[i] === "docs");
-
-  // All docs
-  if (categorySet.size === 1 && categorySet.has("docs")) {
-    return {
-      primary: "docs",
-      alt1: "chore",
-      alt2: "refactor",
-      categoryReason: "documentation files changed",
-    };
+  // 1. binary-only: every staged file is binary, any category
+  if (changes.every((c) => c.isBinary)) {
+    return "binary-only";
   }
 
-  // All tests
-  if (categorySet.size === 1 && categorySet.has("test")) {
-    return {
-      primary: "test",
-      alt1: "refactor",
-      alt2: "chore",
-      categoryReason: "test files changed",
-    };
+  // 2. rename-only-pure: every file is a rename with zero additions and zero deletions or no text diff
+  if (
+    changes.length > 0 &&
+    changes.every(
+      (c) =>
+        c.status === "renamed" &&
+        (!c.hasTextDiff || ((c.additions ?? 0) === 0 && (c.deletions ?? 0) === 0)),
+    )
+  ) {
+    return "rename-only-pure";
   }
 
-  // All config / lockfile
-  const isOnlyConfigOrLockfile = changes.every((c) => {
-    const cat = classifyPath(c.path);
-    return cat === "config" || cat === "lockfile";
-  });
-  if (isOnlyConfigOrLockfile) {
-    return {
-      primary: "chore",
-      alt1: "refactor",
-      alt2: "fix",
-      categoryReason: "configuration or dependency files changed",
-    };
+  // 3. delete-only: every file is deleted
+  if (changes.every((c) => c.status === "deleted")) {
+    return "delete-only";
   }
 
-  // Source files present
-  if (sourceFiles.length > 0) {
-    const hasAdded = sourceFiles.some((f) => f.status === "added");
-    const allDeletedOrRenamed = sourceFiles.every(
-      (f) => f.status === "deleted" || f.status === "renamed",
-    );
-    const allModified = sourceFiles.every((f) => f.status === "modified");
-
-    if (hasAdded) {
-      return {
-        primary: "feat",
-        alt1: "refactor",
-        alt2: "fix",
-        categoryReason: "new source files added",
-      };
-    }
-    if (allDeletedOrRenamed) {
-      return {
-        primary: "refactor",
-        alt1: "chore",
-        alt2: "feat",
-        categoryReason: "source files restructured, renamed, or removed",
-      };
-    }
-    if (allModified) {
-      return {
-        primary: "refactor",
-        alt1: "fix",
-        alt2: "feat",
-        categoryReason: "existing source files modified",
-      };
-    }
-    return {
-      primary: "refactor",
-      alt1: "fix",
-      alt2: "feat",
-      categoryReason: "source code changes detected",
-    };
+  // 4. docs-only: every file is in the docs category
+  if (categories.every((cat) => cat === "docs")) {
+    return "docs-only";
   }
 
-  // No source files, mixed categories
-  if (testFiles.length > 0) {
-    return {
-      primary: "test",
-      alt1: "chore",
-      alt2: "refactor",
-      categoryReason: "test files and related project files changed",
-    };
-  }
-  if (docsFiles.length > 0) {
-    return {
-      primary: "docs",
-      alt1: "chore",
-      alt2: "refactor",
-      categoryReason: "documentation and related project files changed",
-    };
+  // 5. test-only: every file is in the test category
+  if (categories.every((cat) => cat === "test")) {
+    return "test-only";
   }
 
-  return {
-    primary: "chore",
-    alt1: "refactor",
-    alt2: "fix",
-    categoryReason: "project files updated",
-  };
+  // 6. lockfile-only: every file is in the lockfile category
+  if (categories.every((cat) => cat === "lockfile")) {
+    return "lockfile-only";
+  }
+
+  // 7. config-only: every file is in config or lockfile category (at least one config file)
+  if (
+    categories.every((cat) => cat === "config" || cat === "lockfile") &&
+    categories.some((cat) => cat === "config")
+  ) {
+    return "config-only";
+  }
+
+  // 8. generated-only: every file is in the generated category
+  if (categories.every((cat) => cat === "generated")) {
+    return "generated-only";
+  }
+
+  // 9. source-with-added: at least one added source-category file with additions > 0
+  if (
+    changes.some(
+      (c) => classifyPath(c.path) === "source" && c.status === "added" && (c.additions ?? 0) > 0,
+    )
+  ) {
+    return "source-with-added";
+  }
+
+  // 10. source-modified-or-other: source files present without added source file with additions
+  if (categories.includes("source")) {
+    return "source-modified-or-other";
+  }
+
+  // 11. mixed: everything else
+  return "mixed";
 }
 
 function deriveVerb(changes: readonly StagedFileChange[]): string {
@@ -251,58 +223,220 @@ function deriveVerb(changes: readonly StagedFileChange[]): string {
   return "update";
 }
 
-function buildPhrases(
+interface BucketPlan {
+  readonly type: CommitType;
+  readonly categoryName: string;
+  readonly s1Subject: string;
+  readonly s1Scope: string | null;
+  readonly s2Candidates: readonly { readonly subject: string; readonly scope: string | null }[];
+  readonly s3Candidates: readonly string[];
+}
+
+function createBucketPlan(
+  bucket: BucketId,
   changes: readonly StagedFileChange[],
-  scope: string | null,
-): { specificPhrase: string; broadPhrase: string } {
-  if (changes.length === 1) {
-    const file = changes[0]!;
-    if (file.status === "renamed" && file.previousPath) {
-      const oldBase = extractBasename(file.previousPath);
-      const newBase = extractBasename(file.path);
+  derivedSourceScope: string | null,
+): BucketPlan {
+  const isSingle = changes.length === 1;
+  const singleFile = isSingle ? changes[0]! : null;
+  const singleBase = singleFile ? extractBasename(singleFile.path) : "";
+  const singleVerb = singleFile
+    ? singleFile.status === "added"
+      ? "add"
+      : singleFile.status === "deleted"
+        ? "remove"
+        : singleFile.status === "renamed"
+          ? "rename"
+          : "update"
+    : deriveVerb(changes);
+
+  switch (bucket) {
+    case "binary-only": {
+      const s1Subject = isSingle ? `${singleVerb} ${singleBase}` : `${singleVerb} project assets`;
       return {
-        specificPhrase: `${oldBase} to ${newBase}`,
-        broadPhrase: `${newBase}`,
+        type: "chore",
+        categoryName: "binary asset",
+        s1Subject,
+        s1Scope: null,
+        s2Candidates: [
+          { subject: "refresh binary assets", scope: "assets" },
+          { subject: "update binary files", scope: "assets" },
+        ],
+        s3Candidates: ["maintain repository assets", "update repository media"],
       };
     }
-    const base = extractBasename(file.path);
-    return {
-      specificPhrase: base,
-      broadPhrase: "files",
-    };
-  }
 
-  if (scope !== null) {
-    return {
-      specificPhrase: `${scope} files`,
-      broadPhrase: "project files",
-    };
-  }
+    case "rename-only-pure": {
+      const s1Subject =
+        isSingle && singleFile?.previousPath
+          ? `rename ${extractBasename(singleFile.previousPath)} to ${singleBase}`
+          : "rename project files";
+      return {
+        type: "refactor",
+        categoryName: "file rename",
+        s1Subject,
+        s1Scope: null,
+        s2Candidates: [
+          { subject: "reorganize project file structure", scope: null },
+          { subject: "relocate tracked files", scope: null },
+        ],
+        s3Candidates: ["update project file paths", "restructure repository layout"],
+      };
+    }
 
-  const categories = new Set(changes.map((c) => classifyPath(c.path)));
-  if (categories.has("source") && categories.has("test")) {
-    return {
-      specificPhrase: "implementation and tests",
-      broadPhrase: "codebase",
-    };
-  }
-  if (categories.has("docs")) {
-    return {
-      specificPhrase: "documentation",
-      broadPhrase: "project files",
-    };
-  }
-  if (categories.has("test")) {
-    return {
-      specificPhrase: "tests",
-      broadPhrase: "test suite",
-    };
-  }
+    case "delete-only": {
+      const s1Subject = isSingle ? `remove ${singleBase}` : "remove project files";
+      return {
+        type: "chore",
+        categoryName: "file deletion",
+        s1Subject,
+        s1Scope: null,
+        s2Candidates: [
+          { subject: "remove repository files", scope: null },
+          { subject: "prune tracked files", scope: null },
+        ],
+        s3Candidates: ["prune repository files", "delete staged files"],
+      };
+    }
 
-  return {
-    specificPhrase: "project files",
-    broadPhrase: "codebase",
-  };
+    case "docs-only": {
+      const s1Subject = isSingle
+        ? `${singleVerb} ${singleBase}`
+        : `${singleVerb} project documentation`;
+      return {
+        type: "docs",
+        categoryName: "documentation",
+        s1Subject,
+        s1Scope: null,
+        s2Candidates: [
+          { subject: "update project documentation", scope: null },
+          { subject: "revise project documentation", scope: null },
+        ],
+        s3Candidates: ["revise documentation files", "maintain repository documentation"],
+      };
+    }
+
+    case "test-only": {
+      const s1Subject = isSingle ? `${singleVerb} ${singleBase}` : `${singleVerb} project tests`;
+      return {
+        type: "test",
+        categoryName: "test",
+        s1Subject,
+        s1Scope: null,
+        s2Candidates: [
+          { subject: "update test coverage", scope: null },
+          { subject: "maintain test suite", scope: null },
+        ],
+        s3Candidates: ["revise test files", "update repository tests"],
+      };
+    }
+
+    case "lockfile-only": {
+      const s1Subject = changes.every((c) => c.status === "added")
+        ? "add dependency lockfile"
+        : "update dependency lockfile";
+      return {
+        type: "chore",
+        categoryName: "dependency lockfile",
+        s1Subject,
+        s1Scope: null,
+        s2Candidates: [
+          { subject: "refresh dependency lockfile", scope: "deps" },
+          { subject: "update package lockfile", scope: "deps" },
+        ],
+        s3Candidates: ["synchronize dependency metadata", "maintain lockfile metadata"],
+      };
+    }
+
+    case "config-only": {
+      const s1Subject = isSingle
+        ? `${singleVerb} ${singleBase}`
+        : `${singleVerb} project configuration`;
+      return {
+        type: "chore",
+        categoryName: "configuration",
+        s1Subject,
+        s1Scope: null,
+        s2Candidates: [
+          { subject: "revise development tooling", scope: "tooling" },
+          { subject: "update project tooling", scope: "tooling" },
+        ],
+        s3Candidates: ["maintain repository configuration", "synchronize configuration files"],
+      };
+    }
+
+    case "generated-only": {
+      const s1Subject = isSingle ? `${singleVerb} ${singleBase}` : `${singleVerb} generated files`;
+      return {
+        type: "chore",
+        categoryName: "generated",
+        s1Subject,
+        s1Scope: null,
+        s2Candidates: [
+          { subject: "refresh generated output", scope: null },
+          { subject: "update build output", scope: null },
+        ],
+        s3Candidates: ["maintain generated artifacts", "synchronize generated files"],
+      };
+    }
+
+    case "source-with-added": {
+      const s1Subject = isSingle
+        ? `add ${singleBase}`
+        : derivedSourceScope !== null
+          ? `add ${derivedSourceScope} files`
+          : "add source files";
+      return {
+        type: "feat",
+        categoryName: "new source",
+        s1Subject,
+        s1Scope: derivedSourceScope,
+        s2Candidates: [
+          { subject: "add source files", scope: null },
+          { subject: "add project features", scope: null },
+          { subject: "add project components", scope: null },
+        ],
+        s3Candidates: ["add codebase files", "add implementation files", "add repository features"],
+      };
+    }
+
+    case "source-modified-or-other": {
+      const s1Subject = isSingle
+        ? `${singleVerb} ${singleBase}`
+        : derivedSourceScope !== null
+          ? `${singleVerb} ${derivedSourceScope} files`
+          : `${singleVerb} source files`;
+      return {
+        type: "chore",
+        categoryName: "source",
+        s1Subject,
+        s1Scope: derivedSourceScope,
+        s2Candidates: [
+          { subject: "update project source", scope: null },
+          { subject: "revise source files", scope: null },
+        ],
+        s3Candidates: [
+          "maintain project files",
+          "synchronize project codebase",
+          "update repository source",
+        ],
+      };
+    }
+
+    case "mixed": {
+      return {
+        type: "chore",
+        categoryName: "project",
+        s1Subject: "update staged project files",
+        s1Scope: null,
+        s2Candidates: [
+          { subject: "maintain project files", scope: null },
+          { subject: "revise staged files", scope: null },
+        ],
+        s3Candidates: ["synchronize repository changes", "update repository files"],
+      };
+    }
+  }
 }
 
 export function generateHeuristicSuggestions(
@@ -312,92 +446,100 @@ export function generateHeuristicSuggestions(
     throw new VibeCommitError("Cannot generate suggestions for empty staged changes list");
   }
 
-  const scope = deriveScope(changes);
-  const typeSelection = selectCommitTypes(changes);
-  const verb = deriveVerb(changes);
-  const { specificPhrase, broadPhrase } = buildPhrases(changes, scope);
+  const bucket = classifyBucket(changes);
+  const derivedSourceScope = deriveScope(changes);
+  const plan = createBucketPlan(bucket, changes, derivedSourceScope);
 
-  // 1. Primary specific suggestion (with scope if available)
-  const subject1 = sanitizeSubject(`${verb} ${specificPhrase}`);
+  const fileCount = changes.length;
+  const fileWord = fileCount === 1 ? "file" : "files";
+
+  // 1. Suggestion 1: most specific truthful variant
+  const subject1 = sanitizeSubject(plan.s1Subject);
   const suggestion1: Suggestion = {
-    type: typeSelection.primary,
-    scope,
+    type: plan.type,
+    scope: plan.s1Scope,
     subject: subject1,
-    reason: `Primary heuristic based on ${typeSelection.categoryReason} (${changes.length} file${changes.length === 1 ? "" : "s"})`,
+    reason: `Primary heuristic based on ${fileCount} staged ${plan.categoryName} ${fileWord}`,
   };
 
-  // 2. Plausible alternative suggestion
-  const altVerb = typeSelection.alt1 === "fix" ? "fix" : verb;
-  let subject2 = sanitizeSubject(`${altVerb} ${specificPhrase}`);
-  // If subject2 collides with subject1 under the same type or formatted message, adjust wording
-  if (
-    formatCommitMessage({ type: typeSelection.alt1, scope, subject: subject2 }) ===
-    formatCommitMessage(suggestion1)
-  ) {
-    subject2 = sanitizeSubject(`apply updates to ${specificPhrase}`);
-  }
-  const suggestion2: Suggestion = {
-    type: typeSelection.alt1,
-    scope,
+  const usedFormatted = new Set<string>();
+  usedFormatted.add(formatCommitMessage(suggestion1));
+
+  // 2. Suggestion 2: alternate specificity, optional conventional scope
+  let s2Item = plan.s2Candidates[0]!;
+  let subject2 = sanitizeSubject(s2Item.subject);
+  let formatted2 = formatCommitMessage({
+    type: plan.type,
+    scope: s2Item.scope,
     subject: subject2,
-    reason: `Alternative ${typeSelection.alt1} heuristic based on file change types`,
-  };
+  });
 
-  // 3. Broader, scope-less variant
-  const broadType = typeSelection.alt2 !== typeSelection.primary ? typeSelection.alt2 : "chore";
-  let subject3 = sanitizeSubject(`${verb} ${broadPhrase}`);
-  if (
-    formatCommitMessage({ type: broadType, scope: null, subject: subject3 }) ===
-      formatCommitMessage(suggestion1) ||
-    formatCommitMessage({ type: broadType, scope: null, subject: subject3 }) ===
-      formatCommitMessage(suggestion2)
-  ) {
-    subject3 = sanitizeSubject(
-      `update ${changes.length} staged file${changes.length === 1 ? "" : "s"}`,
-    );
+  if (usedFormatted.has(formatted2) && plan.s2Candidates.length > 1) {
+    s2Item = plan.s2Candidates[1]!;
+    subject2 = sanitizeSubject(s2Item.subject);
+    formatted2 = formatCommitMessage({
+      type: plan.type,
+      scope: s2Item.scope,
+      subject: subject2,
+    });
   }
-  const suggestion3: Suggestion = {
-    type: broadType,
+
+  if (usedFormatted.has(formatted2)) {
+    subject2 = sanitizeSubject(`revise staged ${plan.categoryName} files`);
+    formatted2 = formatCommitMessage({
+      type: plan.type,
+      scope: s2Item.scope,
+      subject: subject2,
+    });
+  }
+
+  const suggestion2: Suggestion = {
+    type: plan.type,
+    scope: s2Item.scope,
+    subject: subject2,
+    reason: `Alternative phrasing based on ${plan.categoryName} file metadata`,
+  };
+  usedFormatted.add(formatted2);
+
+  // 3. Suggestion 3: broad project-level wording, scope-less
+  let subject3Candidate = plan.s3Candidates[0]!;
+  let subject3 = sanitizeSubject(subject3Candidate);
+  let formatted3 = formatCommitMessage({
+    type: plan.type,
     scope: null,
     subject: subject3,
-    reason: `Broad scope-less heuristic covering all staged changes`,
-  };
+  });
 
-  // Ensure all three suggestions have genuinely distinct formatted messages
-  const suggestions = [suggestion1, suggestion2, suggestion3] as const;
-  const formatted = suggestions.map(formatCommitMessage);
-  const uniqueFormatted = new Set(formatted);
-
-  if (uniqueFormatted.size !== 3) {
-    // Deterministic adjustment if any collision remains
-    const fallbackSubjects = [
-      suggestion1.subject,
-      sanitizeSubject(`modify ${specificPhrase}`),
-      sanitizeSubject(`update codebase files`),
-    ];
-    return [
-      SuggestionSchema.parse({
-        type: suggestion1.type,
-        scope: suggestion1.scope,
-        subject: fallbackSubjects[0],
-        reason: suggestion1.reason,
-      }),
-      SuggestionSchema.parse({
-        type: suggestion2.type,
-        scope: suggestion2.scope,
-        subject: fallbackSubjects[1],
-        reason: suggestion2.reason,
-      }),
-      SuggestionSchema.parse({
-        type: suggestion3.type,
-        scope: null,
-        subject: fallbackSubjects[2],
-        reason: suggestion3.reason,
-      }),
-    ];
+  if (usedFormatted.has(formatted3) && plan.s3Candidates.length > 1) {
+    subject3Candidate = plan.s3Candidates[1]!;
+    subject3 = sanitizeSubject(subject3Candidate);
+    formatted3 = formatCommitMessage({
+      type: plan.type,
+      scope: null,
+      subject: subject3,
+    });
   }
 
-  // Validate all through SuggestionSchema and validateCommitMessage before returning
+  if (usedFormatted.has(formatted3)) {
+    subject3 = sanitizeSubject(`synchronize ${fileCount} staged ${fileWord}`);
+    formatted3 = formatCommitMessage({
+      type: plan.type,
+      scope: null,
+      subject: subject3,
+    });
+  }
+
+  const suggestion3: Suggestion = {
+    type: plan.type,
+    scope: null,
+    subject: subject3,
+    reason: `Broad phrasing covering all ${fileCount} staged ${fileWord}`,
+  };
+  usedFormatted.add(formatted3);
+
+  const suggestions = [suggestion1, suggestion2, suggestion3] as const;
+
+  // Defensive validation of all through SuggestionSchema and validateCommitMessage
   for (const s of suggestions) {
     SuggestionSchema.parse(s);
     const valid = validateCommitMessage(formatCommitMessage(s));

@@ -223,9 +223,9 @@ describe("staged changes CLI flow in Phase 3", () => {
     const stdout = getStdout();
     expect(stdout).toContain("Staged files: 1");
     expect(stdout).toContain("Diff budget:");
-    expect(stdout).toContain("1. refactor(domain):");
-    expect(stdout).toContain("2. fix(domain):");
-    expect(stdout).toContain("3. ");
+    expect(stdout).toContain("1. chore(domain):");
+    expect(stdout).toContain("2. chore:");
+    expect(stdout).toContain("3. chore:");
     expect(stdout).toContain("Suggestions generated using local heuristics");
     expect(stdout).toContain("Interactive selection and commit creation are not implemented yet");
     expect(getStderr()).toBe("");

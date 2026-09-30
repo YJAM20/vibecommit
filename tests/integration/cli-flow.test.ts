@@ -141,10 +141,9 @@ describe("CLI flow integration with real and simulated repositories", () => {
 
       const stdout = getStdout();
       expect(stdout).toContain("Staged files: 1 (1 added)");
-      expect(stdout).toContain("Diff budget:");
-      expect(stdout).toContain("1. docs");
-      expect(stdout).toContain("2. ");
-      expect(stdout).toContain("3. ");
+      expect(stdout).toContain("1. docs: add README");
+      expect(stdout).toContain("2. docs:");
+      expect(stdout).toContain("3. docs:");
       expect(stdout).toContain("Suggestions generated using local heuristics");
 
       // Verify raw diff content is never printed
@@ -186,9 +185,9 @@ describe("CLI flow integration with real and simulated repositories", () => {
       const stdout = getStdout();
       expect(stdout).toContain("Dry-run mode is active.");
       expect(stdout).toContain("Diff budget:");
-      expect(stdout).toContain("1. ");
-      expect(stdout).toContain("2. ");
-      expect(stdout).toContain("3. ");
+      expect(stdout).toContain("1. feat:");
+      expect(stdout).toContain("2. feat:");
+      expect(stdout).toContain("3. feat:");
       expect(stdout).toContain("Suggestions generated using local heuristics");
       expect(stdout).not.toContain(secretMarker);
 
