@@ -1,11 +1,12 @@
 import { OpenAI } from "openai";
+import { COMMIT_TYPES } from "../domain/commit-types.js";
 import { SuggestionsResponseSchema, type Suggestion } from "../domain/suggestion-schema.js";
 import type { SanitizedDiff } from "../security/types.js";
 import type { OpenAiConfig } from "./config.js";
 import { buildCorrectivePrompt, buildSystemPrompt, buildUserPrompt } from "./prompt.js";
 import { ProviderError, type SuggestionProvider } from "./types.js";
 
-const COMMIT_SUGGESTIONS_JSON_SCHEMA = {
+export const COMMIT_SUGGESTIONS_JSON_SCHEMA = {
   name: "commit_suggestions",
   strict: true,
   schema: {
@@ -18,7 +19,7 @@ const COMMIT_SUGGESTIONS_JSON_SCHEMA = {
           properties: {
             type: {
               type: "string",
-              enum: ["feat", "fix", "docs", "refactor", "test", "chore"],
+              enum: COMMIT_TYPES,
             },
             scope: {
               type: ["string", "null"],

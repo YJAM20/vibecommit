@@ -177,4 +177,74 @@ describe("Secret Redactor Unit Tests", () => {
     expect(serializedReport).not.toContain("verySensitiveSecretStringThatMustNeverLeak");
     expect(report.totalRedactions).toBe(1);
   });
+
+  describe("Enhanced sensitive assignment matching and false-positive prevention", () => {
+    test("redacts prefixed sensitive assignments across underscores and camelCase", () => {
+      const testCases = [
+        { input: 'DB_PASSWORD = "db-password-secret-123"', rawSecret: "db-password-secret-123" },
+        { input: 'JWT_SECRET = "jwt-secret-token-abc"', rawSecret: "jwt-secret-token-abc" },
+        { input: 'GITHUB_TOKEN = "ghp-custom-secret-tok"', rawSecret: "ghp-custom-secret-tok" },
+        {
+          input: 'STRIPE_SECRET_KEY = "stripe-secret-val-xyz"',
+          rawSecret: "stripe-secret-val-xyz",
+        },
+        {
+          input: 'AWS_SECRET_ACCESS_KEY = "aws-secret-access-key-val"',
+          rawSecret: "aws-secret-access-key-val",
+        },
+        { input: 'CLIENT_SECRET = "client-secret-val-456"', rawSecret: "client-secret-val-456" },
+        {
+          input: 'const dbPassword = "camel-case-pass-secret";',
+          rawSecret: "camel-case-pass-secret",
+        },
+        {
+          input: 'const accessToken = "access-token-secret-val";',
+          rawSecret: "access-token-secret-val",
+        },
+        { input: 'accessToken: "object-key-tok-val"', rawSecret: "object-key-tok-val" },
+      ];
+
+      for (const { input, rawSecret } of testCases) {
+        const { sanitizedText, report } = redactSecrets(input);
+        expect(report.totalRedactions).toBeGreaterThanOrEqual(1);
+        expect(sanitizedText).toContain("[REDACTED:sensitive_assignment]");
+        expect(sanitizedText).not.toContain(rawSecret);
+      }
+    });
+
+    test("does not redact benign identifiers, type annotations, placeholders, or empty values", () => {
+      const benignInputs = [
+        "password: string",
+        "secret?: string;",
+        "token: unknown;",
+        'password = ""',
+        "secret: ''",
+        'apiKey = "<your-key>"',
+        'token = "${VAR}"',
+        'api_key = "your_api_key_here"',
+        "primary_key = 1",
+        'sort_key: "id"',
+        "const tokenizer = new Tokenizer();",
+        "max_tokens = 1000",
+        "process.env.GITHUB_TOKEN",
+        "const token = process.env.GITHUB_TOKEN;",
+      ];
+
+      for (const input of benignInputs) {
+        const { sanitizedText, report } = redactSecrets(input);
+        expect(sanitizedText).toBe(input);
+        expect(report.totalRedactions).toBe(0);
+      }
+    });
+
+    test("adversarial long line finishes quickly without catastrophic backtracking", () => {
+      const longAdversarialLine = "const notAKey = " + "a_".repeat(50000) + ";";
+      const start = Date.now();
+      const { report } = redactSecrets(longAdversarialLine);
+      const elapsed = Date.now() - start;
+
+      expect(elapsed).toBeLessThan(1000);
+      expect(report.totalRedactions).toBe(0);
+    });
+  });
 });

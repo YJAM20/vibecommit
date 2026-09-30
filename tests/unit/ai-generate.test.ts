@@ -238,4 +238,29 @@ describe("SuggestionOrchestrator", () => {
     expect(result.fallbackReason).toBeUndefined();
     expect(result.safeFallbackMessage).toBeUndefined();
   });
+
+  test("calls onBeforeRequest immediately before network call, but never in no-ai or missing key mode", async () => {
+    const onBeforeRequest = vi.fn();
+    const generateSuggestions = vi.fn().mockResolvedValue(VALID_SUGGESTIONS);
+    const mockProvider: SuggestionProvider = { generateSuggestions };
+
+    const orchestrator = new SuggestionOrchestrator({ provider: mockProvider });
+
+    // 1. Called in normal AI mode
+    await orchestrator.getSuggestions(diff, files, { noAi: false, onBeforeRequest });
+    expect(onBeforeRequest).toHaveBeenCalledTimes(1);
+
+    onBeforeRequest.mockClear();
+
+    // 2. Never called in explicit no-ai mode
+    await orchestrator.getSuggestions(diff, files, { noAi: true, onBeforeRequest });
+    expect(onBeforeRequest).not.toHaveBeenCalled();
+
+    onBeforeRequest.mockClear();
+
+    // 3. Never called when API key is missing (fails before network call)
+    const orchestratorNoKey = new SuggestionOrchestrator({ env: {} });
+    await orchestratorNoKey.getSuggestions(diff, files, { noAi: false, onBeforeRequest });
+    expect(onBeforeRequest).not.toHaveBeenCalled();
+  });
 });

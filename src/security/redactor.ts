@@ -26,11 +26,152 @@ const AWS_ACCESS_KEY_REGEX = /\b(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16,20}\b/g;
 // 6. Bearer authorization header values
 const BEARER_TOKEN_REGEX = /\b(Bearer)\s+([A-Za-z0-9\-._~+/]+=*)\b/gi;
 
+const BENIGN_IDENTIFIERS = new Set([
+  "primary_key",
+  "primarykey",
+  "sort_key",
+  "sortkey",
+  "foreign_key",
+  "foreignkey",
+  "partition_key",
+  "partitionkey",
+  "tokenizer",
+  "tokenizers",
+  "max_tokens",
+  "maxtokens",
+  "total_tokens",
+  "totaltokens",
+  "num_tokens",
+  "numtokens",
+  "key_enter",
+  "keyenter",
+  "token_type",
+  "tokentype",
+]);
+
+const SENSITIVE_WORD_PATTERNS: readonly RegExp[] = [
+  /password/i,
+  /passwd/i,
+  /pwd/i,
+  /secret/i,
+  /token/i,
+  /api[_-]?key/i,
+  /auth[_-]?key/i,
+  /auth[_-]?token/i,
+  /private[_-]?key/i,
+  /client[_-]?secret/i,
+  /access[_-]?key/i,
+  /access[_-]?token/i,
+  /database[_-]?url/i,
+  /db[_-]?url/i,
+];
+
+function isSensitiveIdentifier(rawName: string): boolean {
+  const cleanName = rawName.replace(/^["']|["']$/g, "").trim();
+  const lower = cleanName.toLowerCase();
+
+  if (BENIGN_IDENTIFIERS.has(lower)) {
+    return false;
+  }
+
+  if (
+    lower.endsWith("tokens") &&
+    (lower.includes("max") ||
+      lower.includes("total") ||
+      lower.includes("num") ||
+      lower.includes("count"))
+  ) {
+    return false;
+  }
+
+  return SENSITIVE_WORD_PATTERNS.some((pattern) => pattern.test(cleanName));
+}
+
+const TS_TYPE_NAMES = new Set([
+  "string",
+  "number",
+  "boolean",
+  "any",
+  "unknown",
+  "never",
+  "void",
+  "null",
+  "undefined",
+  "symbol",
+  "bigint",
+  "object",
+  "date",
+  "function",
+]);
+
+function isTypeAnnotation(op: string, value: string): boolean {
+  if (op !== ":") {
+    return false;
+  }
+  const clean = value.replace(/;$/, "").trim().toLowerCase();
+  if (TS_TYPE_NAMES.has(clean)) {
+    return true;
+  }
+  if (
+    clean.includes("|") ||
+    clean.endsWith("[]") ||
+    clean.startsWith("record<") ||
+    clean.startsWith("map<") ||
+    clean.startsWith("promise<")
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function isPlaceholderOrBenignValue(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return true;
+  }
+
+  const lower = trimmed.toLowerCase();
+  if (NON_SECRET_UNQUOTED.has(lower)) {
+    return true;
+  }
+  if (lower.startsWith("process.env.") || lower.startsWith("env.")) {
+    return true;
+  }
+
+  // Angle bracket placeholders: <your-key>, etc.
+  if (trimmed.startsWith("<") && trimmed.endsWith(">")) {
+    return true;
+  }
+
+  // Env var placeholders: ${VAR}, etc.
+  if (trimmed.startsWith("${") && trimmed.endsWith("}")) {
+    return true;
+  }
+
+  // Placeholder keywords
+  if (
+    lower.includes("your_") ||
+    lower.includes("your-") ||
+    lower.includes("yourapi") ||
+    lower.includes("changeme") ||
+    lower.includes("todo") ||
+    lower.includes("example") ||
+    lower.includes("placeholder") ||
+    lower === "xxx" ||
+    lower === "xxxx" ||
+    lower === "..."
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 const QUOTED_ASSIGNMENT_REGEX =
-  /((?:["']?)(?:\b(?:API_?KEY|OPENAI_?API_?KEY|DATABASE_?URL|PASSWORD|SECRET|TOKEN|AUTH_?TOKEN|ACCESS_?TOKEN|PRIVATE_?KEY|CLIENT_?SECRET|SECRET_?KEY|APP_?SECRET)\b)(?:["']?)\s*[:=]\s*)(['"])(?!\s*\[REDACTED:)(.+?)\2/gi;
+  /(^|[^\w$])(["']?[A-Za-z0-9_$-]+["']?\s*\??\s*([:=])\s*)(['"])(?!\s*\[REDACTED:)(.*?)\4/gm;
 
 const UNQUOTED_ASSIGNMENT_REGEX =
-  /((?:["']?)(?:\b(?:API_?KEY|OPENAI_?API_?KEY|DATABASE_?URL|PASSWORD|SECRET|TOKEN|AUTH_?TOKEN|ACCESS_?TOKEN|PRIVATE_?KEY|CLIENT_?SECRET|SECRET_?KEY|APP_?SECRET)\b)(?:["']?)\s*[:=]\s*)(?!\s*\[REDACTED:)([^'"\r\n\s;,]+)/gi;
+  /(^|[^\w$])(["']?[A-Za-z0-9_$-]+["']?\s*\??\s*([:=])\s*)(?!\s*\[REDACTED:)([^'"\r\n\s;,]+)/gm;
 
 const NON_SECRET_UNQUOTED = new Set(["true", "false", "null", "undefined"]);
 
@@ -47,29 +188,54 @@ function executeRegexRule(
   return { output, count };
 }
 
+function extractIdentifier(prefix: string): { identifier: string; op: string } {
+  const match = /(["']?[A-Za-z0-9_$-]+["']?)\s*\??\s*([:=])/.exec(prefix);
+  if (match && match[1] && match[2]) {
+    return { identifier: match[1], op: match[2] };
+  }
+  return { identifier: "", op: "" };
+}
+
 function executeSensitiveAssignment(input: string): { output: string; count: number } {
   let count = 0;
 
-  // First pass: quoted assignments (e.g. API_KEY="secret", 'token': 'secret')
-  let current = input.replace(QUOTED_ASSIGNMENT_REGEX, (_match, prefix: string, quote: string) => {
-    count += 1;
-    return `${prefix}${quote}[REDACTED:sensitive_assignment]${quote}`;
-  });
+  // First pass: quoted assignments (e.g. DB_PASSWORD = "secret", accessToken: 'secret')
+  let current = input.replace(
+    QUOTED_ASSIGNMENT_REGEX,
+    (match, lead: string, prefix: string, op: string, quote: string, value: string) => {
+      const { identifier } = extractIdentifier(prefix);
+      if (!identifier || !isSensitiveIdentifier(identifier)) {
+        return match;
+      }
+      if (isPlaceholderOrBenignValue(value)) {
+        return match;
+      }
+      if (isTypeAnnotation(op, value)) {
+        return match;
+      }
+      count += 1;
+      return `${lead}${prefix}${quote}[REDACTED:sensitive_assignment]${quote}`;
+    },
+  );
 
-  // Second pass: unquoted assignments (e.g. API_KEY=secret)
-  current = current.replace(UNQUOTED_ASSIGNMENT_REGEX, (match, prefix: string, value: string) => {
-    const trimmed = value.trim().toLowerCase();
-    // Skip booleans, null, undefined, or environment variable references
-    if (
-      NON_SECRET_UNQUOTED.has(trimmed) ||
-      trimmed.startsWith("process.env.") ||
-      trimmed.startsWith("env.")
-    ) {
-      return match;
-    }
-    count += 1;
-    return `${prefix}[REDACTED:sensitive_assignment]`;
-  });
+  // Second pass: unquoted assignments (e.g. DB_PASSWORD=secret, API_KEY=abc)
+  current = current.replace(
+    UNQUOTED_ASSIGNMENT_REGEX,
+    (match, lead: string, prefix: string, op: string, value: string) => {
+      const { identifier } = extractIdentifier(prefix);
+      if (!identifier || !isSensitiveIdentifier(identifier)) {
+        return match;
+      }
+      if (isPlaceholderOrBenignValue(value)) {
+        return match;
+      }
+      if (isTypeAnnotation(op, value)) {
+        return match;
+      }
+      count += 1;
+      return `${lead}${prefix}[REDACTED:sensitive_assignment]`;
+    },
+  );
 
   return { output: current, count };
 }

@@ -153,6 +153,9 @@ async function runFlow(
 
   const generationResult = await orchestrator.getSuggestions(sanitizedDiff, stagedResult.files, {
     noAi: options.noAi,
+    onBeforeRequest: () => {
+      io.stdout("Requesting commit suggestions from OpenAI (sanitized diff)...\n");
+    },
   });
 
   if (generationResult.safeFallbackMessage) {

@@ -96,6 +96,7 @@ describe("AI suggestion generation and fallback integration", () => {
       expect(getStderr()).toBe("");
 
       const stdout = getStdout();
+      expect(stdout).toContain("Requesting commit suggestions from OpenAI (sanitized diff)...");
       expect(stdout).toContain("AI-generated suggestions");
       expect(stdout).toContain("feat(auth): implement token authentication");
       expect(stdout).toContain("Commit created successfully:");
@@ -255,6 +256,7 @@ describe("AI suggestion generation and fallback integration", () => {
       expect(stdout).toContain("Suggested commit messages (local heuristics):");
       expect(stdout).not.toContain("AI request timed out");
       expect(stdout).not.toContain("OPENAI_API_KEY");
+      expect(stdout).not.toContain("Requesting commit suggestions from OpenAI");
 
       const commitLog = await repo.runGit(["log", "-1", "--oneline"]);
       expect(commitLog.stdout).toContain("docs: add doc");

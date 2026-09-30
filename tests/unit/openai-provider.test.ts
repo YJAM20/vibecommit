@@ -1,7 +1,11 @@
 import { describe, expect, test, vi } from "vitest";
 import type { OpenAI } from "openai";
 import type { OpenAiConfig } from "../../src/ai/config.js";
-import { OpenAiSuggestionProvider } from "../../src/ai/openai-provider.js";
+import { COMMIT_TYPES } from "../../src/domain/commit-types.js";
+import {
+  COMMIT_SUGGESTIONS_JSON_SCHEMA,
+  OpenAiSuggestionProvider,
+} from "../../src/ai/openai-provider.js";
 import { ProviderError } from "../../src/ai/types.js";
 import { buildSanitizedDiff } from "../../src/security/sanitized-diff.js";
 import type { StagedFileChange } from "../../src/domain/staged-change.js";
@@ -306,5 +310,60 @@ describe("OpenAiSuggestionProvider", () => {
       const message = err instanceof Error ? err.message : String(err);
       expect(message).not.toContain(fakeConfig.apiKey);
     }
+  });
+
+  test("schema enum equals COMMIT_TYPES and includes 'security'", () => {
+    expect(
+      COMMIT_SUGGESTIONS_JSON_SCHEMA.schema.properties.suggestions.items.properties.type.enum,
+    ).toEqual(COMMIT_TYPES);
+    expect(
+      COMMIT_SUGGESTIONS_JSON_SCHEMA.schema.properties.suggestions.items.properties.type.enum,
+    ).toContain("security");
+  });
+
+  test("validates provider response containing 'security' type suggestion", async () => {
+    const mockClient = {
+      chat: {
+        completions: {
+          create: vi.fn().mockResolvedValue({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    suggestions: [
+                      {
+                        type: "security",
+                        scope: "auth",
+                        subject: "patch token verification bypass",
+                        reason: "mitigates auth bypass vulnerability",
+                      },
+                      {
+                        type: "fix",
+                        scope: "deps",
+                        subject: "update vulnerable dependency",
+                        reason: "fixes reported security advisory",
+                      },
+                      {
+                        type: "test",
+                        scope: "security",
+                        subject: "add exploit regression test",
+                        reason: "verifies vulnerability fix",
+                      },
+                    ],
+                  }),
+                },
+              },
+            ],
+          }),
+        },
+      },
+    } as unknown as OpenAI;
+
+    const provider = new OpenAiSuggestionProvider(fakeConfig, mockClient);
+    const suggestions = await provider.generateSuggestions(createMockDiff());
+
+    expect(suggestions).toHaveLength(3);
+    expect(suggestions[0]!.type).toBe("security");
+    expect(suggestions[0]!.subject).toBe("patch token verification bypass");
   });
 });

@@ -16,10 +16,12 @@ export interface OrchestratorDependencies {
   readonly provider?: SuggestionProvider;
   readonly configLoader?: (env?: Record<string, string | undefined>) => OpenAiConfig;
   readonly env?: Record<string, string | undefined>;
+  readonly onBeforeRequest?: () => void;
 }
 
 export interface GenerationOptions {
   readonly noAi: boolean;
+  readonly onBeforeRequest?: () => void;
 }
 
 export function validateSuggestions(
@@ -128,11 +130,13 @@ export class SuggestionOrchestrator {
   private readonly provider?: SuggestionProvider;
   private readonly configLoader: (env?: Record<string, string | undefined>) => OpenAiConfig;
   private readonly env: Record<string, string | undefined>;
+  private readonly onBeforeRequest?: () => void;
 
   constructor(deps: OrchestratorDependencies = {}) {
     this.provider = deps.provider;
     this.configLoader = deps.configLoader ?? loadOpenAiConfig;
     this.env = deps.env ?? process.env;
+    this.onBeforeRequest = deps.onBeforeRequest;
   }
 
   async getSuggestions(
@@ -172,6 +176,9 @@ export class SuggestionOrchestrator {
     // 3. Attempt 1
     let lastFailureReason: SafeFallbackReason;
     let retryFeedback: string | undefined;
+
+    const notifyBeforeRequest = options.onBeforeRequest ?? this.onBeforeRequest;
+    notifyBeforeRequest?.();
 
     try {
       const suggestions = await provider.generateSuggestions(diff);
