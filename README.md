@@ -4,11 +4,32 @@ Privacy-aware AI-powered Git CLI for Conventional Commit suggestions.
 
 ## Status
 
-Status: under active development (Phase 3: Domain model, validation, heuristic generator, diff budgeting)
+Status: under active development (Phase 6: OpenAI provider integration, structured suggestions, retry, and safe local fallback)
 
-## Current behavior
+## Current Behavior
 
-`--no-ai` generates three local Conventional Commit suggestions from staged Git changes using deterministic heuristics. Default mode summarizes staged changes and diff budget limits without AI suggestions (AI generation is not implemented yet). Nothing is committed.
+- `vibecommit`: Generates Conventional Commit suggestions using OpenAI when `OPENAI_API_KEY` is configured. If OpenAI is unconfigured, times out, or fails, VibeCommit safely falls back to deterministic local heuristic suggestions.
+- `vibecommit --no-ai`: Uses local heuristic suggestions directly without loading, configuring, or calling OpenAI.
+- `vibecommit --dry-run`: Displays suggestions and previews the selected message without creating a Git commit.
+
+## Privacy and Data Boundary
+
+- Only sanitized and budgeted staged diff content is ever sent to the AI provider (`SanitizedDiff`).
+- Content policy withholds high-risk paths, binary files, lockfiles, and generated files.
+- Regex-based secret redaction masks credential patterns before budgeting or transmission. Pattern-based redaction is a risk reduction layer, not an absolute guarantee.
+
+## Configuration
+
+To use OpenAI suggestions, set your API key in your shell environment:
+
+```powershell
+$env:OPENAI_API_KEY = "your-api-key-here"
+```
+
+Optional settings:
+
+- `$env:VIBECOMMIT_OPENAI_MODEL = "gpt-4o-mini"`
+- `$env:VIBECOMMIT_OPENAI_TIMEOUT_MS = "15000"`
 
 ## Development
 

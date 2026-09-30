@@ -345,17 +345,23 @@ describe("staged changes CLI flow in Phase 3", () => {
     expect(getStderr()).toBe("");
   });
 
-  test("with staged changes and no flags: outputs summary and diff budget, notes AI not implemented yet, no suggestions", async () => {
+  test("with staged changes and no flags: outputs summary, notes missing OPENAI_API_KEY, and uses local fallback suggestions", async () => {
     const { io, gitClient, getStdout, getStderr } = createStagedTestContext();
-    const exitCode = await main(["node", "vibecommit"], { io, gitClient });
+    const mockPrompt: PromptInterface = {
+      isInteractive: () => true,
+      askSelection: () => Promise.resolve(null),
+      askConfirmation: () => Promise.resolve(false),
+      close: () => {},
+    };
+    const exitCode = await main(["node", "vibecommit"], { io, gitClient, prompt: mockPrompt });
 
     expect(exitCode).toBe(0);
     const stdout = getStdout();
     expect(stdout).toContain("Staged files: 1");
     expect(stdout).toContain("Diff budget:");
-    expect(stdout).toContain("AI commit suggestions are not implemented yet");
-    expect(stdout).not.toContain("1. ");
-    expect(stdout).not.toContain("Suggestions generated using local heuristics");
+    expect(stdout).toContain("OPENAI_API_KEY is not configured. Using local fallback suggestions.");
+    expect(stdout).toContain("1. chore(domain):");
+    expect(stdout).toContain("Suggestions generated using local heuristics");
     expect(getStderr()).toBe("");
   });
 

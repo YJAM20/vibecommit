@@ -1,5 +1,5 @@
 import { Command, CommanderError } from "commander";
-import { generateHeuristicSuggestions } from "./domain/heuristics.js";
+import { SuggestionOrchestrator } from "./ai/generate.js";
 import { formatCommitMessage } from "./domain/suggestion-schema.js";
 import { validateCommitMessage } from "./domain/validate-message.js";
 import type { GitClient } from "./git/git-client.js";
@@ -32,6 +32,7 @@ export interface AppDependencies {
   readonly io?: Io;
   readonly gitClient?: GitClient;
   readonly prompt?: PromptInterface;
+  readonly orchestrator?: SuggestionOrchestrator;
 }
 
 interface RawOptions {
@@ -80,23 +81,27 @@ function resolveDependencies(ioOrDeps: Io | AppDependencies): {
   io: Io;
   gitClient: GitClient;
   prompt: PromptInterface;
+  orchestrator: SuggestionOrchestrator;
 } {
   if (isIo(ioOrDeps)) {
     return {
       io: ioOrDeps,
       gitClient: new DefaultGitClient(),
       prompt: new DefaultPromptService(),
+      orchestrator: new SuggestionOrchestrator(),
     };
   }
 
   const appIo = ioOrDeps.io ?? defaultIo;
   const appGitClient = ioOrDeps.gitClient ?? new DefaultGitClient();
   const appPrompt = ioOrDeps.prompt ?? new DefaultPromptService();
+  const appOrchestrator = ioOrDeps.orchestrator ?? new SuggestionOrchestrator();
 
   return {
     io: appIo,
     gitClient: appGitClient,
     prompt: appPrompt,
+    orchestrator: appOrchestrator,
   };
 }
 
@@ -105,6 +110,7 @@ async function runFlow(
   io: Io,
   gitClient: GitClient,
   prompt: PromptInterface,
+  orchestrator: SuggestionOrchestrator,
 ): Promise<void> {
   const version = getVersion();
   io.stdout(`vibecommit v${version}\n`);
@@ -141,30 +147,26 @@ async function runFlow(
   io.stdout(renderPrivacySummary(sanitizedDiff.report));
   io.stdout(renderDiffBudgetStats(sanitizedDiff.budgetStats));
 
-  if (!options.noAi) {
-    io.stdout(
-      "AI commit suggestions are not implemented yet. Use '--no-ai' to view local heuristic suggestions.\n",
-    );
-    io.stdout("Redaction, AI suggestions, and commit creation are not implemented yet.\n");
-    return;
+  if (options.noAi) {
+    io.stdout("AI is disabled.\n");
   }
 
-  io.stdout("AI is disabled.\n");
+  const generationResult = await orchestrator.getSuggestions(sanitizedDiff, stagedResult.files, {
+    noAi: options.noAi,
+  });
 
-  const suggestions = generateHeuristicSuggestions(stagedResult.files);
-
-  for (const s of suggestions) {
-    const formatted = formatCommitMessage(s);
-    const validation = validateCommitMessage(formatted);
-    if (!validation.ok) {
-      throw new VibeCommitError(
-        `Generated suggestion '${formatted}' failed validation: ${validation.errors.join(", ")}`,
-      );
-    }
+  if (generationResult.safeFallbackMessage) {
+    io.stdout(`${generationResult.safeFallbackMessage}\n`);
   }
 
-  io.stdout(renderSuggestions(suggestions));
-  io.stdout("Suggestions generated using local heuristics (no AI model called).\n");
+  const suggestions = generationResult.suggestions;
+  io.stdout(renderSuggestions(suggestions, generationResult.source));
+
+  if (generationResult.source === "ai") {
+    io.stdout("Suggestions generated using OpenAI.\n");
+  } else {
+    io.stdout("Suggestions generated using local heuristics (no AI model called).\n");
+  }
 
   if (options.dryRun) {
     const defaultSuggestion = suggestions[0];
@@ -214,7 +216,7 @@ export async function main(
   argv: string[],
   ioOrDeps: Io | AppDependencies = defaultIo,
 ): Promise<number> {
-  const { io, gitClient, prompt } = resolveDependencies(ioOrDeps);
+  const { io, gitClient, prompt, orchestrator } = resolveDependencies(ioOrDeps);
 
   try {
     const program = createProgram(io);
@@ -226,7 +228,7 @@ export async function main(
       noAi: rawOptions.ai === false,
     };
 
-    await runFlow(options, io, gitClient, prompt);
+    await runFlow(options, io, gitClient, prompt, orchestrator);
     return ExitCode.Success;
   } catch (error: unknown) {
     if (error instanceof CommanderError) {

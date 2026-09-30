@@ -151,9 +151,16 @@ export function renderDiffBudgetStats(stats: DiffBudgetStats): string {
   return `Diff budget: ${budgeted.toLocaleString()} chars (within limits)\n`;
 }
 
-export function renderSuggestions(suggestions: readonly Suggestion[]): string {
+export function renderSuggestions(
+  suggestions: readonly Suggestion[],
+  source: "ai" | "fallback" = "fallback",
+): string {
   const lines: string[] = [];
-  lines.push("Suggested commit messages (local heuristics):");
+  const header =
+    source === "ai"
+      ? "Suggested commit messages (AI-generated suggestions):"
+      : "Suggested commit messages (local heuristics):";
+  lines.push(header);
 
   for (let i = 0; i < suggestions.length; i++) {
     const s = suggestions[i]!;

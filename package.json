@@ -24,6 +24,7 @@
   "dependencies": {
     "commander": "^15.0.0",
     "execa": "^9.6.1",
+    "openai": "^7.25.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {

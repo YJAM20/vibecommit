@@ -46,13 +46,18 @@ export const SuggestionSchema = z
     type: CommitTypeSchema,
     scope: ScopeSchema.nullable()
       .optional()
-      .transform((val) => val ?? null),
+      .transform((val: string | null | undefined): string | null => val ?? null),
     subject: SubjectSchema,
     reason: ReasonSchema,
   })
   .strict();
 
-export type Suggestion = z.infer<typeof SuggestionSchema>;
+export interface Suggestion {
+  readonly type: CommitType;
+  readonly scope: string | null;
+  readonly subject: string;
+  readonly reason: string;
+}
 
 export const SuggestionsResponseSchema = z
   .object({

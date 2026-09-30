@@ -89,7 +89,7 @@ describe("CLI flow integration with real and simulated repositories", () => {
       const diffBefore = await repo.runGit(["diff", "--staged"]);
       expect(diffBefore.stdout).toContain(secretMarker);
 
-      const exitCode = await main(["node", "vibecommit"], {
+      const exitCode = await main(["node", "vibecommit", "--dry-run"], {
         io,
         gitClient: new DefaultGitClient(repo.path),
       });
@@ -236,7 +236,7 @@ describe("CLI flow integration with real and simulated repositories", () => {
     }
   });
 
-  test("staged changes without --no-ai prints AI not implemented yet and no suggestions", async () => {
+  test("staged changes without --no-ai in dry-run notes missing OPENAI_API_KEY and uses local fallback suggestions", async () => {
     const repo = await createTempRepo();
     const { io, getStdout, getStderr } = createTestIo();
 
@@ -247,7 +247,7 @@ describe("CLI flow integration with real and simulated repositories", () => {
 
       const diffBefore = await repo.runGit(["diff", "--staged"]);
 
-      const exitCode = await main(["node", "vibecommit"], {
+      const exitCode = await main(["node", "vibecommit", "--dry-run"], {
         io,
         gitClient: new DefaultGitClient(repo.path),
       });
@@ -256,9 +256,11 @@ describe("CLI flow integration with real and simulated repositories", () => {
       expect(getStderr()).toBe("");
 
       const stdout = getStdout();
-      expect(stdout).toContain("AI commit suggestions are not implemented yet. Use '--no-ai'");
-      expect(stdout).not.toContain("1. ");
-      expect(stdout).not.toContain("Suggestions generated using local heuristics");
+      expect(stdout).toContain(
+        "OPENAI_API_KEY is not configured. Using local fallback suggestions.",
+      );
+      expect(stdout).toContain("1. ");
+      expect(stdout).toContain("Suggestions generated using local heuristics");
       expect(stdout).not.toContain(secretMarker);
 
       const diffAfter = await repo.runGit(["diff", "--staged"]);
