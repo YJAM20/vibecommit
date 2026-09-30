@@ -6,6 +6,8 @@ import type { GitClient } from "./git/git-client.js";
 import { DefaultGitClient } from "./git/git-client.js";
 import { buildSanitizedDiff } from "./security/sanitized-diff.js";
 import type { SanitizedDiff } from "./security/types.js";
+import type { PromptInterface } from "./ui/prompt.js";
+import { DefaultPromptService } from "./ui/prompt.js";
 import {
   renderDiffBudgetStats,
   renderNoStagedChanges,
@@ -29,6 +31,7 @@ export interface CliOptions {
 export interface AppDependencies {
   readonly io?: Io;
   readonly gitClient?: GitClient;
+  readonly prompt?: PromptInterface;
 }
 
 interface RawOptions {
@@ -76,24 +79,33 @@ function isIo(value: Io | AppDependencies): value is Io {
 function resolveDependencies(ioOrDeps: Io | AppDependencies): {
   io: Io;
   gitClient: GitClient;
+  prompt: PromptInterface;
 } {
   if (isIo(ioOrDeps)) {
     return {
       io: ioOrDeps,
       gitClient: new DefaultGitClient(),
+      prompt: new DefaultPromptService(),
     };
   }
 
   const appIo = ioOrDeps.io ?? defaultIo;
   const appGitClient = ioOrDeps.gitClient ?? new DefaultGitClient();
+  const appPrompt = ioOrDeps.prompt ?? new DefaultPromptService();
 
   return {
     io: appIo,
     gitClient: appGitClient,
+    prompt: appPrompt,
   };
 }
 
-async function runFlow(options: CliOptions, io: Io, gitClient: GitClient): Promise<void> {
+async function runFlow(
+  options: CliOptions,
+  io: Io,
+  gitClient: GitClient,
+  prompt: PromptInterface,
+): Promise<void> {
   const version = getVersion();
   io.stdout(`vibecommit v${version}\n`);
 
@@ -129,41 +141,80 @@ async function runFlow(options: CliOptions, io: Io, gitClient: GitClient): Promi
   io.stdout(renderPrivacySummary(sanitizedDiff.report));
   io.stdout(renderDiffBudgetStats(sanitizedDiff.budgetStats));
 
-  if (options.dryRun) {
-    io.stdout("Dry-run mode is active.\n");
-  }
-
-  if (options.noAi) {
-    io.stdout("AI is disabled.\n");
-
-    const suggestions = generateHeuristicSuggestions(stagedResult.files);
-
-    for (const s of suggestions) {
-      const formatted = formatCommitMessage(s);
-      const validation = validateCommitMessage(formatted);
-      if (!validation.ok) {
-        throw new VibeCommitError(
-          `Generated suggestion '${formatted}' failed validation: ${validation.errors.join(", ")}`,
-        );
-      }
-    }
-
-    io.stdout(renderSuggestions(suggestions));
-    io.stdout("Suggestions generated using local heuristics (no AI model called).\n");
-    io.stdout("Interactive selection and commit creation are not implemented yet.\n");
-  } else {
+  if (!options.noAi) {
     io.stdout(
       "AI commit suggestions are not implemented yet. Use '--no-ai' to view local heuristic suggestions.\n",
     );
     io.stdout("Redaction, AI suggestions, and commit creation are not implemented yet.\n");
+    return;
   }
+
+  io.stdout("AI is disabled.\n");
+
+  const suggestions = generateHeuristicSuggestions(stagedResult.files);
+
+  for (const s of suggestions) {
+    const formatted = formatCommitMessage(s);
+    const validation = validateCommitMessage(formatted);
+    if (!validation.ok) {
+      throw new VibeCommitError(
+        `Generated suggestion '${formatted}' failed validation: ${validation.errors.join(", ")}`,
+      );
+    }
+  }
+
+  io.stdout(renderSuggestions(suggestions));
+  io.stdout("Suggestions generated using local heuristics (no AI model called).\n");
+
+  if (options.dryRun) {
+    const defaultSuggestion = suggestions[0];
+    const preview = defaultSuggestion ? formatCommitMessage(defaultSuggestion) : "";
+    io.stdout(`\nSelected commit message:\n  ${preview}\n\n`);
+    io.stdout("Dry-run mode is active: no commit will be created.\n");
+    return;
+  }
+
+  if (!prompt.isInteractive()) {
+    throw new VibeCommitError(
+      "VibeCommit requires an interactive terminal for commit creation. Use '--dry-run' in non-interactive environments.",
+    );
+  }
+
+  const selection = await prompt.askSelection(suggestions.length);
+  if (selection === null) {
+    io.stdout("Commit aborted by user.\n");
+    return;
+  }
+
+  const chosenSuggestion = suggestions[selection - 1];
+  if (!chosenSuggestion) {
+    throw new VibeCommitError("Selected suggestion is invalid.");
+  }
+
+  const formattedMessage = formatCommitMessage(chosenSuggestion);
+  const validation = validateCommitMessage(formattedMessage);
+  if (!validation.ok) {
+    throw new VibeCommitError(
+      `Selected commit message failed validation: ${validation.errors.join(", ")}`,
+    );
+  }
+
+  const confirmed = await prompt.askConfirmation(formattedMessage);
+  if (!confirmed) {
+    io.stdout("Commit cancelled. Staged changes remain staged.\n");
+    return;
+  }
+
+  const commitResult = await gitClient.createCommit(formattedMessage);
+  const displaySummary = commitResult.summaryLine || formattedMessage;
+  io.stdout(`Commit created successfully:\n  ${displaySummary}\n`);
 }
 
 export async function main(
   argv: string[],
   ioOrDeps: Io | AppDependencies = defaultIo,
 ): Promise<number> {
-  const { io, gitClient } = resolveDependencies(ioOrDeps);
+  const { io, gitClient, prompt } = resolveDependencies(ioOrDeps);
 
   try {
     const program = createProgram(io);
@@ -175,7 +226,7 @@ export async function main(
       noAi: rawOptions.ai === false,
     };
 
-    await runFlow(options, io, gitClient);
+    await runFlow(options, io, gitClient, prompt);
     return ExitCode.Success;
   } catch (error: unknown) {
     if (error instanceof CommanderError) {
@@ -186,5 +237,7 @@ export async function main(
       return ExitCode.UsageError;
     }
     return reportError(error, io.stderr);
+  } finally {
+    prompt.close();
   }
 }

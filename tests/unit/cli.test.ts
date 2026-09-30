@@ -1,7 +1,8 @@
 import { describe, expect, test } from "vitest";
 import { main } from "../../src/app.js";
 import type { Io } from "../../src/app.js";
-import type { GitClient } from "../../src/git/git-client.js";
+import type { GitClient, GitCommitResult } from "../../src/git/git-client.js";
+import type { PromptInterface } from "../../src/ui/prompt.js";
 
 function createTestContext(): {
   io: Io;
@@ -33,6 +34,13 @@ function createTestContext(): {
           },
         },
         diffText: "",
+      }),
+    createCommit: () =>
+      Promise.resolve({
+        success: true,
+        commitHash: "mock123",
+        summaryLine: "[master mock123] chore: mock",
+        rawOutput: "mock",
       }),
   };
 
@@ -198,6 +206,13 @@ describe("staged changes CLI flow in Phase 3", () => {
           },
           diffText: "diff --git a/src/domain/app.ts b/src/domain/app.ts\n+line",
         }),
+      createCommit: (msg: string) =>
+        Promise.resolve({
+          success: true,
+          commitHash: "mock456",
+          summaryLine: `[master mock456] ${msg}`,
+          rawOutput: `[master mock456] ${msg}`,
+        }),
     };
 
     return {
@@ -215,9 +230,9 @@ describe("staged changes CLI flow in Phase 3", () => {
     };
   }
 
-  test("with staged changes and --no-ai: outputs summary, diff budget line, and 3 valid suggestions", async () => {
+  test("with staged changes and --no-ai --dry-run: outputs summary, diff budget line, 3 suggestions, and dry-run preview", async () => {
     const { io, gitClient, getStdout, getStderr } = createStagedTestContext();
-    const exitCode = await main(["node", "vibecommit", "--no-ai"], { io, gitClient });
+    const exitCode = await main(["node", "vibecommit", "--no-ai", "--dry-run"], { io, gitClient });
 
     expect(exitCode).toBe(0);
     const stdout = getStdout();
@@ -227,7 +242,106 @@ describe("staged changes CLI flow in Phase 3", () => {
     expect(stdout).toContain("2. chore:");
     expect(stdout).toContain("3. chore:");
     expect(stdout).toContain("Suggestions generated using local heuristics");
-    expect(stdout).toContain("Interactive selection and commit creation are not implemented yet");
+    expect(stdout).toContain("Selected commit message:");
+    expect(stdout).toContain("Dry-run mode is active: no commit will be created.");
+    expect(getStderr()).toBe("");
+  });
+
+  test("in non-TTY environment without --dry-run: reports friendly error and exits with code 1", async () => {
+    const { io, gitClient, getStderr } = createStagedTestContext();
+    const mockPrompt: PromptInterface = {
+      isInteractive: () => false,
+      askSelection: () => Promise.resolve(null),
+      askConfirmation: () => Promise.resolve(false),
+      close: () => {},
+    };
+
+    const exitCode = await main(["node", "vibecommit", "--no-ai"], {
+      io,
+      gitClient,
+      prompt: mockPrompt,
+    });
+
+    expect(exitCode).toBe(1);
+    expect(getStderr()).toContain(
+      "Error: VibeCommit requires an interactive terminal for commit creation",
+    );
+    expect(getStderr()).toContain("Use '--dry-run' in non-interactive environments.");
+  });
+
+  test("in interactive environment: prompts user, creates commit on confirmation, and reports success", async () => {
+    const { io, gitClient, getStdout, getStderr } = createStagedTestContext();
+    let commitCalledWithMessage: string | undefined;
+    (
+      gitClient as unknown as { createCommit: (msg: string) => Promise<GitCommitResult> }
+    ).createCommit = (msg: string) => {
+      commitCalledWithMessage = msg;
+      return Promise.resolve({
+        success: true,
+        commitHash: "1a2b3c4",
+        summaryLine: `[master 1a2b3c4] ${msg}`,
+        rawOutput: `[master 1a2b3c4] ${msg}\n 1 file changed, 1 insertion(+)`,
+      });
+    };
+
+    const mockPrompt: PromptInterface = {
+      isInteractive: () => true,
+      askSelection: () => Promise.resolve(1),
+      askConfirmation: () => Promise.resolve(true),
+      close: () => {},
+    };
+
+    const exitCode = await main(["node", "vibecommit", "--no-ai"], {
+      io,
+      gitClient,
+      prompt: mockPrompt,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(commitCalledWithMessage).toBe("chore(domain): update app");
+    const stdout = getStdout();
+    expect(stdout).toContain("Commit created successfully:");
+    expect(stdout).toContain("[master 1a2b3c4] chore(domain): update app");
+    expect(getStderr()).toBe("");
+  });
+
+  test("in interactive environment: exits cleanly with code 0 on user cancellation", async () => {
+    const { io, gitClient, getStdout, getStderr } = createStagedTestContext();
+    const mockPrompt: PromptInterface = {
+      isInteractive: () => true,
+      askSelection: () => Promise.resolve(null),
+      askConfirmation: () => Promise.resolve(false),
+      close: () => {},
+    };
+
+    const exitCode = await main(["node", "vibecommit", "--no-ai"], {
+      io,
+      gitClient,
+      prompt: mockPrompt,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(getStdout()).toContain("Commit aborted by user.");
+    expect(getStderr()).toBe("");
+  });
+
+  test("in interactive environment: exits cleanly with code 0 when user declines confirmation", async () => {
+    const { io, gitClient, getStdout, getStderr } = createStagedTestContext();
+    const mockPrompt: PromptInterface = {
+      isInteractive: () => true,
+      askSelection: () => Promise.resolve(2),
+      askConfirmation: () => Promise.resolve(false),
+      close: () => {},
+    };
+
+    const exitCode = await main(["node", "vibecommit", "--no-ai"], {
+      io,
+      gitClient,
+      prompt: mockPrompt,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(getStdout()).toContain("Commit cancelled. Staged changes remain staged.");
     expect(getStderr()).toBe("");
   });
 

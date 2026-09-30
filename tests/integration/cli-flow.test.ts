@@ -131,7 +131,7 @@ describe("CLI flow integration with real and simulated repositories", () => {
       const diffBefore = await repo.runGit(["diff", "--staged"]);
       expect(diffBefore.stdout).toContain(secretMarker);
 
-      const exitCode = await main(["node", "vibecommit", "--no-ai"], {
+      const exitCode = await main(["node", "vibecommit", "--no-ai", "--dry-run"], {
         io,
         gitClient: new DefaultGitClient(repo.path),
       });
@@ -183,7 +183,7 @@ describe("CLI flow integration with real and simulated repositories", () => {
       expect(getStderr()).toBe("");
 
       const stdout = getStdout();
-      expect(stdout).toContain("Dry-run mode is active.");
+      expect(stdout).toContain("Dry-run mode is active: no commit will be created.");
       expect(stdout).toContain("Diff budget:");
       expect(stdout).toContain("1. feat:");
       expect(stdout).toContain("2. feat:");
@@ -214,7 +214,7 @@ describe("CLI flow integration with real and simulated repositories", () => {
       const diffBefore = await repo.runGit(["diff", "--staged"]);
       expect(diffBefore.stdout).toContain(deepMarker);
 
-      const exitCode = await main(["node", "vibecommit", "--no-ai"], {
+      const exitCode = await main(["node", "vibecommit", "--no-ai", "--dry-run"], {
         io,
         gitClient: new DefaultGitClient(repo.path),
       });
@@ -283,6 +283,7 @@ describe("CLI flow integration with real and simulated repositories", () => {
       getStagedDiff: () => Promise.resolve(""),
       getStagedChanges: () =>
         Promise.reject(new Error("Should not be called when Git check fails")),
+      createCommit: () => Promise.reject(new Error("Should not be called")),
     };
 
     const exitCode = await main(["node", "vibecommit"], { io, gitClient: mockGitClient });
@@ -290,5 +291,29 @@ describe("CLI flow integration with real and simulated repositories", () => {
     expect(getStdout()).toContain("vibecommit v0.1.0");
     expect(getStderr()).toContain("Error: Git is not installed or not found in PATH");
     expect(getStderr()).toContain("Hint: Please install Git");
+  });
+
+  test("non-TTY environment without --dry-run reports friendly error and exits with code 1", async () => {
+    const repo = await createTempRepo();
+    const { io, getStderr } = createTestIo();
+
+    try {
+      await writeFile(join(repo.path, "test.txt"), "hello\n");
+      await repo.runGit(["add", "test.txt"]);
+
+      // DefaultPromptService in non-interactive environment
+      const exitCode = await main(["node", "vibecommit", "--no-ai"], {
+        io,
+        gitClient: new DefaultGitClient(repo.path),
+      });
+
+      expect(exitCode).toBe(1);
+      expect(getStderr()).toContain(
+        "Error: VibeCommit requires an interactive terminal for commit creation",
+      );
+      expect(getStderr()).toContain("Use '--dry-run' in non-interactive environments.");
+    } finally {
+      await repo.cleanup();
+    }
   });
 });

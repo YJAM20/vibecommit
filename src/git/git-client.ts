@@ -21,6 +21,7 @@ export type GitRunner = (
     cwd: string;
     env: Record<string, string | undefined>;
     maxBuffer?: number;
+    input?: string;
   },
 ) => Promise<GitRunResult>;
 
@@ -29,6 +30,7 @@ export const defaultGitRunner: GitRunner = async (args, options) => {
     cwd: options.cwd,
     env: options.env,
     maxBuffer: options.maxBuffer,
+    input: options.input,
     reject: false,
   });
   return {
@@ -38,11 +40,19 @@ export const defaultGitRunner: GitRunner = async (args, options) => {
   };
 };
 
+export interface GitCommitResult {
+  readonly success: boolean;
+  readonly commitHash?: string;
+  readonly summaryLine?: string;
+  readonly rawOutput: string;
+}
+
 export interface GitClient {
   checkGitInstalled(): Promise<void>;
   getRepoRoot(): Promise<string>;
   getStagedDiff(): Promise<string>;
   getStagedChanges(): Promise<StagedChangesResult>;
+  createCommit(message: string): Promise<GitCommitResult>;
 }
 
 export class DefaultGitClient implements GitClient {
@@ -64,12 +74,17 @@ export class DefaultGitClient implements GitClient {
     return env;
   }
 
-  private async runGit(args: readonly string[], maxBuffer?: number): Promise<GitRunResult> {
+  private async runGit(
+    args: readonly string[],
+    maxBuffer?: number,
+    input?: string,
+  ): Promise<GitRunResult> {
     try {
       const result = await this.runner(args, {
         cwd: this.cwd,
         env: this.getSanitizedEnv(),
         maxBuffer,
+        input,
       });
 
       return result;
@@ -227,6 +242,35 @@ export class DefaultGitClient implements GitClient {
       files,
       summary,
       diffText,
+    };
+  }
+
+  async createCommit(message: string): Promise<GitCommitResult> {
+    const result = await this.runGit(["commit", "-F", "-"], undefined, message);
+
+    if (result.exitCode !== 0) {
+      const errorOutput =
+        result.stderr.trim() || result.stdout.trim() || "Git commit command failed";
+      const firstErrorLine = errorOutput.split(/\r?\n/)[0]?.trim() ?? errorOutput;
+      throw new VibeCommitError(`Failed to create commit: ${firstErrorLine}`, {
+        hint: "Check Git hooks, author configuration, or repository state.",
+      });
+    }
+
+    const lines = result.stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+
+    const summaryLine = lines.find((line) => line.startsWith("[")) ?? lines[0];
+    const hashMatch = summaryLine ? summaryLine.match(/\[(?:.+?\s+)?([0-9a-fA-F]{7,40})\]/) : null;
+    const commitHash = hashMatch ? hashMatch[1] : undefined;
+
+    return {
+      success: true,
+      commitHash,
+      summaryLine,
+      rawOutput: result.stdout,
     };
   }
 }
