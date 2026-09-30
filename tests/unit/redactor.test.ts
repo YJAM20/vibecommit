@@ -246,5 +246,15 @@ describe("Secret Redactor Unit Tests", () => {
       expect(elapsed).toBeLessThan(1000);
       expect(report.totalRedactions).toBe(0);
     });
+
+    test("preserves process.env references while redacting sensitive fallback tokens", () => {
+      const input = 'const apiKey = process.env.API_KEY || "sk-demo12345678901234567890123456";';
+      const { sanitizedText, report } = redactSecrets(input);
+
+      expect(report.totalRedactions).toBe(1);
+      expect(sanitizedText).toContain("process.env.API_KEY");
+      expect(sanitizedText).toContain("[REDACTED:openai_api_key]");
+      expect(sanitizedText).not.toContain("sk-demo12345678901234567890123456");
+    });
   });
 });
